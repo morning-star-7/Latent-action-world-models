@@ -485,17 +485,17 @@ def train_epoch(model, dataset, optimizer):
 		# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
 		# print('#', loss)
 		obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
-		loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+		loss=model.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
 		loss.mean().backward()
 		for p in [
-			model.module.lag.parameters(),
-			model.module.dynamic.parameters()]:
+			model.lag.parameters(),
+			model.dynamic.parameters()]:
 			total_norm = nn.utils.clip_grad_norm_(p, max_norm=1.0)
 			# print('grad_norm:', total_norm)
 		optimizer.step()
 		if cnt % 20 ==0:
-			model.module.visualize(obs0,_obs0,obs1,_obs1)
-			# model.module.visualize_embedding(obs0, obs1)
+			model.visualize(obs0,_obs0,obs1,_obs1)
+			# model.visualize_embedding(obs0, obs1)
 			# break
 		print('##', loss.mean().item())
 		
@@ -536,21 +536,22 @@ def pretrain():
 	# for name,parameters in model.named_parameters():
 	# 	print(name,':',parameters.size())
 	# quit()
-	if torch.cuda.device_count() > 1:
-		print("Let's use", torch.cuda.device_count(), "GPUs!")
-		model = nn.DataParallel(model) # device_ids=[0]
+
+	# # if nn.Dataparallel
+	# if torch.cuda.device_count() > 1:
+	# 	print("Let's use", torch.cuda.device_count(), "GPUs!")
+	# 	model = nn.DataParallel(model) # device_ids=[0]
+
 	model.to(config.device)
-	# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-	# model.to(device)
-	model.module.set_optimizer()
+	model.set_optimizer()
 	# set_optimizer()
 	optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay)
 	
 	# model.restore()
-	model.module.save()
+	model.save()
 	# exit(0)
 	
-	log.set_model(model.module.name)
+	log.set_model(model.name)
 	log_setting()
 
 	
@@ -575,7 +576,7 @@ def pretrain():
 		train_epoch(model, train_dataset,optimizer)
 		# del train_dataset
 		
-		model.module.save()
+		model.save()
 		
 		# tune_dataset = get_tune_dataset()
 		# # state_reconstruct_test(model, tune_dataset)
