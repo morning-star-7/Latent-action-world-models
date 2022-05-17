@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch import optim
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tools import momentum_update
 from config import config
 import numpy as np
@@ -26,10 +27,10 @@ from test import prepare_model, show_image
 
 
 pyplot_cnt = 0
-imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
-imagenet_std = torch.tensor([0.229, 0.224, 0.225])
-imagenet_mean=imagenet_mean.to(config.device)
-imagenet_std=imagenet_std.to(config.device)
+# imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
+# imagenet_std = torch.tensor([0.229, 0.224, 0.225])
+# imagenet_mean=imagenet_mean.to(config.device)
+# imagenet_std=imagenet_std.to(config.device)
 
 # set random seed 
 def setup_seed(seed):
@@ -55,7 +56,7 @@ class Model(nn.Module):
 		                                     downsample=True,
 		                                     momentum=config.bn_momentum)
 		self.decoder = Decoder()
-		self.model_mae= prepare_model('./mae_visualize_vit_base.pth', 'mae_vit_base_patch16')
+		self.model_mae= prepare_model(chkpt_dir='./mae_visualize_vit_base.pth', arch='mae_vit_base_patch16',device=config.device)
 		self.model_mae.requires_grad_(False)
 		self.lag = LatentActionGen(config.num_embeddings,
 		                           num_channels,
@@ -452,9 +453,9 @@ def set_optimizer(lr=config.lr, momentum=config.momentum, weight_decay=config.we
 		raise NotImplementedError(str(config.optim))
 
 
-def train_epoch(model, dataset, optimizer):
+def train_epoch(model, dataset, optimizer,sampler):
 	model.train()
-	data_loader = get_data_loader(dataset)
+	data_loader = get_data_loader(dataset,sampler)
 	cnt = 0
 	for data in data_loader:
 		print(cnt)
@@ -485,17 +486,17 @@ def train_epoch(model, dataset, optimizer):
 		# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
 		# print('#', loss)
 		obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
-		loss=model.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+		loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
 		loss.mean().backward()
 		for p in [
-			model.lag.parameters(),
-			model.dynamic.parameters()]:
+			model.module.lag.parameters(),
+			model.module.dynamic.parameters()]:
 			total_norm = nn.utils.clip_grad_norm_(p, max_norm=1.0)
 			# print('grad_norm:', total_norm)
 		optimizer.step()
 		if cnt % 20 ==0:
-			model.visualize(obs0,_obs0,obs1,_obs1)
-			# model.visualize_embedding(obs0, obs1)
+			model.module.visualize(obs0,_obs0,obs1,_obs1)
+			# model.module.visualize_embedding(obs0, obs1)
 			# break
 		print('##', loss.mean().item())
 		
@@ -512,23 +513,20 @@ def get_tune_dataset():
 
 
 def pretrain():
-	# config.byol_sg = config.byol_mt = False
-	# config.byol_pd = False
-	
-	# transform = transforms.Compose([
-	# 	transforms.Pad([6, 6, 6, 6]),
-	# 	AddGaussianNoise(mean=0., std=0.02),
-	# 	# transforms.RandomRotation(3, interpolation=InterpolationMode.BILINEAR),
-	# 	transforms.RandomResizedCrop([84, 84], scale=(0.86, 0.92), ratio=(0.95, 1.05))
-	# ])
+
+	# distributed training initialize
+	torch.distributed.init_process_group(backend="nccl")
+	local_rank=torch.distributed.get_rank()
+	torch.cuda.set_device(local_rank)
+	config.device= torch.device("cuda",local_rank)
+	# print(local_rank)
+	# print(config.device)
+	# quit()
 
 	row_image_transform = transforms.Compose([
 		transforms.CenterCrop(224)
-
 	])
-	
 	transform = Transforms()
-	
 	model = Model('ssae', transform=transform)
 	# chkpt_dir = './mae_visualize_vit_base.pth'
 	# model_mae = prepare_model(chkpt_dir, 'mae_vit_base_patch16')
@@ -543,15 +541,18 @@ def pretrain():
 	# 	model = nn.DataParallel(model) # device_ids=[0]
 
 	model.to(config.device)
-	model.set_optimizer()
+	model=nn.SyncBatchNorm.convert_sync_batchnorm(model)
+	model=torch.nn.parallel.DistributedDataParallel(model,broadcast_buffers=True, find_unused_parameters=True)
+	# broadcast_buffers=False ???????
+	model.module.set_optimizer()
 	# set_optimizer()
 	optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay)
 	
 	# model.restore()
-	model.save()
+	model.module.save()
 	# exit(0)
 	
-	log.set_model(model.name)
+	log.set_model(model.module.name)
 	log_setting()
 
 	
@@ -566,17 +567,17 @@ def pretrain():
 	# lr_schedule = [0.0001, 0.001, 0.01, 0.0333, 0.0666, 0.1, 0.2, 0.4, 0.8, 1.0]
 
 	train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
-	
+	sampler=DistributedSampler(train_dataset)
 	while True:
 		# if subdir == 1 and block_id < len(lr_schedule):
 		# 	model.set_optimizer(config.lr * lr_schedule[block_id])
 		
 		# train_dataset = get_train_dataset(subdir, block_id)
 		# train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
-		train_epoch(model, train_dataset,optimizer)
+		train_epoch(model, train_dataset,optimizer,sampler)
 		# del train_dataset
 		
-		model.save()
+		model.module.save()
 		
 		# tune_dataset = get_tune_dataset()
 		# # state_reconstruct_test(model, tune_dataset)
@@ -593,3 +594,5 @@ def pretrain():
 
 if __name__ == '__main__':
 	pretrain()
+
+# torchrun --nproc_per_node=8 pretrain.py

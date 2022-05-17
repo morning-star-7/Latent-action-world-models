@@ -42,7 +42,7 @@ class Config:
 		self.clip_max = 1.0
 		self.tau = 0.999
 		# self.device = 'cuda:0'
-		self.device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+		self.device=torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 	
 		# self.layers_num = args.layers_num
 		

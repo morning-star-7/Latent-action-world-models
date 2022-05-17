@@ -121,11 +121,12 @@ def simsiam_distance(_p, _z):
 	return 1. - (_p * _z).sum(dim=1).mean()
 
 
-def get_data_loader(dataset):
+def get_data_loader(dataset,sampler):
 	return DataLoader(dataset,
 	                  batch_size=config.batch_size,
+					  sampler=sampler,
 	                  drop_last=True,
-	                  shuffle=True,
+	                  shuffle=False,
 	                  num_workers=5)
 
 
