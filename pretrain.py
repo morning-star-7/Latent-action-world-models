@@ -300,15 +300,19 @@ class Model(nn.Module):
 		return loss.item()
 	
 	def mae_encoder_forward(self,x):
-		for i in range(4):
-			s,mask, ids_restore=self.model_mae.forward_encoder(x[:,i*3:i*3+3].float(),mask_ratio=0)
-			if i==0:
-				s_4=s
-				ids_restore_4=ids_restore
-			else:
-				s_4=torch.cat([s_4,s],dim=1)
-				ids_restore_4=torch.cat([ids_restore_4,ids_restore],dim=1)
-		return s_4,mask, ids_restore_4
+		# if single image
+		s,mask, ids_restore=self.model_mae.forward_encoder(x.float(),mask_ratio=0)
+		# if 4 frame stack
+		# for i in range(4):
+		# 	s,mask, ids_restore=self.model_mae.forward_encoder(x[:,i*3:i*3+3].float(),mask_ratio=0)
+		# 	if i==0:
+		# 		s_4=s
+		# 		ids_restore_4=ids_restore
+		# 	else:
+		# 		s_4=torch.cat([s_4,s],dim=1)
+		# 		ids_restore_4=torch.cat([ids_restore_4,ids_restore],dim=1)
+		# return s_4,mask, ids_restore_4
+		return s,mask, ids_restore
 	
 	def mae_decoder_forward(self,x,ids_restore):
 		x=self.model_mae.forward_decoder(x,ids_restore)
@@ -339,31 +343,13 @@ class Model(nn.Module):
 		# auto encoder loss
 		s0,mask0,ids_restore0=self.mae_encoder_forward(obs0)
 		s1,mask1,ids_restore1=self.mae_encoder_forward(obs1)
-		# print(s0.shape)
-		# print(ids_restore0.shape)
-		# quit()
-		# print(ids_restore0[0])
-		# print(ids_restore1[0])
-		# quit()
-		# print(s0[:,-197:,:].shape)
-		# print(ids_restore0[:,-196:].shape)
-		# quit()
-		_obs0=self.mae_decoder_forward(s0[:,-197:,:],ids_restore0[:,-196:])
-		_obs0=self.model_mae.unpatchify(_obs0)
-		# print(_obs0.shape)
-		# quit()
+		# # if 4 frames stack
+		# _obs0=self.mae_decoder_forward(s0[:,-197:,:],ids_restore0[:,-196:])
+		# _obs0=self.model_mae.unpatchify(_obs0)
 
-		# _obs0_ = torch.einsum('nchw->nhwc', _obs0).detach().cpu()
-		# obs0_ = torch.einsum('nchw->nhwc', obs0).detach().cpu()
-		# plt.rcParams['figure.figsize'] = [24, 24]
-		# plt.subplot(1, 2, 1)
-		# show_image(obs0_[0], "original")
-		# plt.subplot(1, 2, 2)
-		# show_image(_obs0_[0], "masked")
-		# plt.show()
-		# plt.savefig('test_.png')
-		# print(_obs0.shape)
-		# quit()
+		# if single frame
+		_obs0=self.mae_decoder_forward(s0,ids_restore0)
+		_obs0=self.model_mae.unpatchify(_obs0)
 
 
 		# s0 = self.encoder(obs0)
@@ -383,9 +369,13 @@ class Model(nn.Module):
 			z, loss_lag, perp = self.lag(s0, s1)
 			_s1 = self.dynamic(s0, z)
 
-			# _obs1 = self.decoder(_s1)
-			_obs1=self.mae_decoder_forward(_s1[:,-197:,:],ids_restore1[:,-196:])
-			_obs1=self.model_mae.unpatchify(_obs1)
+
+			# # if 4 frames stack
+			# _obs1=self.mae_decoder_forward(_s1[:,-197:,:],ids_restore1[:,-196:])
+			# _obs1=self.model_mae.unpatchify(_obs1)
+			# if single frame
+			_obs1=self.mae_decoder_forward(_s1,ids_restore1)
+			_obs1=self.model_mae.unpatchify(_obs1)			
 		return obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag
 
 	def calculate_loss(self, obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag):

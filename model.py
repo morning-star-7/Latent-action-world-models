@@ -467,7 +467,11 @@ class Dynamic(nn.Module):
 		x=sz
 		for block in self.blocks:
 			x=block(x)
-		x=x[:,:197*4,:]
+		# # if 4 frames stack
+		# x=x[:,:197*4,:]
+		
+		# if single frame
+		x=x[:,:197,:]
 
 		# x = self.conv(sz)
 		# x = self.bn(x)

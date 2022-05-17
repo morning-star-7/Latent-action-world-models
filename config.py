@@ -48,7 +48,7 @@ class Config:
 		
 		self.dataset = args.dataset.lower()
 		self.observation_shape = (4, 84, 84)
-		self.ss_observation_shape = (4*3, 224, 224)
+		self.ss_observation_shape = (1*3, 224, 224)
 		self.state_shape = (64, 6, 6)
 		self.state_size = self.state_shape[1] * self.state_shape[2]
 		
@@ -65,7 +65,7 @@ class Config:
 		self.state_detach = False
 		
 		self.frame_stack = 4
-		self.ss_frame_stack = 4*3
+		self.ss_frame_stack = 1*3
 		
 		self.representation_loss = 'auto-encoder'
 		# self.representation_loss = 'contrastive'

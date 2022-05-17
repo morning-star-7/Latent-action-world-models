@@ -30,7 +30,7 @@ class ssv2Dataset(Dataset):
         images_path=os.listdir(image_file)
         obs0 = np.zeros((config.ss_frame_stack, *config.ss_observation_shape[1:]), dtype=np.uint8)
         obs1 = np.zeros((config.ss_frame_stack, *config.ss_observation_shape[1:]), dtype=np.uint8)
-        for i in range(4):
+        for i in range(1):
             obs0_img=read_image(os.path.join(image_file,images_path[i]))
             obs1_img=read_image(os.path.join(image_file,images_path[i+4]))
             obs0_img=self.transform(obs0_img).numpy()
@@ -46,10 +46,10 @@ class ssv2Dataset(Dataset):
 # 		transforms.CenterCrop(224)
 # 	])
 #     image_path='/home/chc/dataset/ssv2_extracted_frames_5'
-#     dataset=ssv2Dataset(image_path=image_path,transform=row_image_transform,cut=None)
+#     dataset=ssv2Dataset(image_path=image_path,transform=row_image_transform,cut=100)
 #     # for i in range(10):
-#     obs0, obs1,obs1_img=dataset[0]
-#     print(obs1_img.shape)
+#     obs0, obs1=dataset[0]
+#     print(obs1.shape)
 #     quit()
 #     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
 #     axs[0, 0].imshow(obs0[0:3].T)
@@ -57,7 +57,7 @@ class ssv2Dataset(Dataset):
 #     axs[1, 0].imshow(obs0[6:9].T)
 #     axs[1, 1].imshow(obs0[6:9].T)
 #     fig.savefig('visualize_ss.png')
-#     print('length of dtree(images_list)
+
 
 # if __name__=='__main__':
 #     main()
