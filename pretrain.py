@@ -23,6 +23,7 @@ from transform import Transforms
 import os
 import random
 from test import prepare_model, show_image
+from util.pos_embed import get_2d_sincos_pos_embed
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
@@ -47,7 +48,7 @@ def setup_seed(seed):
 
 
 class Model(nn.Module):
-	def __init__(self, name='naive', num_channels=256, transform=None):
+	def __init__(self, name='naive', num_channels=768, transform=None):
 		super(Model, self).__init__()
 		self.name = name
 		self.encoder = RepresentationNetwork(config.ss_observation_shape,
@@ -102,7 +103,13 @@ class Model(nn.Module):
 			nn.ReLU(),
 			nn.Linear(self.pred_hid, self.pred_out),
 		)
-	
+		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, 768), requires_grad=False)  # fixed sin-cos embedding
+		self.initial_weight()
+
+	def initial_weight(self):
+		pos_embed_set = get_2d_sincos_pos_embed(768, int(28), cls_token=True)
+		self.pos_embed_set.data.copy_(torch.from_numpy(pos_embed_set).float().unsqueeze(0))		
+
 	def set_optimizer(self, lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay):
 		if config.optim is optim.SGD:
 			self.optim = optim.SGD(self.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
@@ -341,6 +348,7 @@ class Model(nn.Module):
 
 
 	def forward(self,obs0,obs1):
+
 		# auto encoder loss
 		s0,mask0,ids_restore0=self.mae_encoder_forward(obs0)
 		s1,mask1,ids_restore1=self.mae_encoder_forward(obs1)
@@ -367,8 +375,8 @@ class Model(nn.Module):
 				s0 = s0.detach()
 				s1 = s1.detach()
 			
-			z, loss_lag, perp = self.lag(s0, s1)
-			_s1 = self.dynamic(s0, z)
+			z, loss_lag, perp = self.lag(s0, s1, self.pos_embed_set)
+			_s1 = self.dynamic(s0, z, self.pos_embed_set)
 
 
 			# # if 4 frames stack
@@ -393,14 +401,17 @@ class Model(nn.Module):
 
 		# dynamic loss
 		obs1_pad =obs1[:, -3:]
-		loss_repr_dyn = (loss_func(_obs1, obs1[:, -3:]) - loss_func(obs1_pad, obs1_pad)).sum(dim=(1,2, 3)).mean()
+		# loss_repr_dyn = (loss_func(_obs1, obs1[:, -3:]) - loss_func(obs1_pad, obs1_pad)).sum(dim=(1,2, 3)).mean()
+		loss_repr_dyn =F.mse_loss(_obs1,obs1)
 		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=1)).sqrt().mean()
-		loss_dyna = (((s1 - _s1) ** 2).sum(dim=(1,2))).sqrt().mean()
+		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=(1,2))).sqrt().mean()
+		loss_dyna = F.mse_loss(s1,_s1)
 
 
 		# total loss
-		loss = loss_dyna + loss_lag #+ loss_repr_dyn
-		print('%.5f %.5f %.5f' % (loss_repr_dyn.mean(), loss_dyna.mean(), loss_lag.mean()))
+		loss =  loss_lag + loss_repr_dyn
+		# loss=loss_lag
+		print('%.5f %.5f %.5f' % (loss_repr_dyn, loss_dyna, loss_lag))
 		return loss
 
 	

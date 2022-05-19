@@ -19,7 +19,7 @@ parser.add_argument('-l', '--lr', type=float, default=5e-4)
 # parser.add_argument('-l', '--lr', type=float, default=0.05)
 parser.add_argument('-c', '--channel', type=int, default=1000)
 # parser.add_argument('-b', '--batch_size', type=int, default=256)
-parser.add_argument('-b', '--batch_size', type=int, default=16)
+parser.add_argument('-b', '--batch_size', type=int, default=4)
 parser.add_argument('-g', '--momentum', type=float, default=0.9)
 parser.add_argument('-w', '--weight_decay', type=float, default=0.0001)
 # parser.add_argument('-o', '--optimizer', type=str, default='Adam')
@@ -52,8 +52,8 @@ class Config:
 		self.state_shape = (64, 6, 6)
 		self.state_size = self.state_shape[1] * self.state_shape[2]
 		
-		self.latent_action_channel = 20
-		self.num_embeddings = 40
+		self.latent_action_channel = 768
+		self.num_embeddings = 512
 		self.state_norm = args.state_norm
 		
 		self.max_dynamic_timestep = 5

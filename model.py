@@ -356,9 +356,13 @@ class VectorQuantizer1D(nn.Module):
 		
 		# Flatten input
 		# TODO multilayer, pooling
+		# print('self.input:',self._input_sizes)
+		# print('input:',input.shape)
+		# quit()
 		
-		flat_input = input.view(-1, self._input_sizes)
-		flat_input = self.linear(flat_input)
+		flat_input = input.contiguous().view(-1, self._input_sizes) # shape []
+		# flat_input = self.linear(flat_input)
+
 
 		# flat_input = self.bn(flat_input)
 		
@@ -372,6 +376,7 @@ class VectorQuantizer1D(nn.Module):
 		distances = (torch.sum(flat_input ** 2, dim=1, keepdim=True)
 		             + torch.sum(self._embedding.weight ** 2, dim=1)
 		             - 2 * torch.matmul(flat_input, self._embedding.weight.t()))
+		# print('distance shape:',distances.shape)
 
 		# print('0',distances.shape)
 		# print(flat_input.shape)
@@ -382,11 +387,14 @@ class VectorQuantizer1D(nn.Module):
 		
 		# Encoding
 		encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+		# print('encoding index:',encoding_indices.shape)
 		encodings = torch.zeros(encoding_indices.shape[0], self._num_embeddings).to(device)
 		encodings.scatter_(1, encoding_indices, 1)
+		# print('encodings shape:',encodings.shape)
 		
 		# Quantize and unflatten
 		quantized = torch.matmul(encodings, self._embedding.weight)  # .view(input_shape)
+		# print('quantize shape:',quantized.shape)
 		
 		# Loss
 		e_latent_loss = torch.mean((quantized.detach() - flat_input) ** 2)
@@ -396,7 +404,12 @@ class VectorQuantizer1D(nn.Module):
 		# quantized = input + (quantized - input).detach()
 		# print(flat_input.shape, quantized.shape)
 		quantized = flat_input + (quantized - flat_input).detach()
-		quantized = quantized.unsqueeze(-1).repeat(1, 1, *input.shape[-1:])
+		quantized=quantized.view(input.shape[0],-1,*input.shape[-1:])
+		# print('z shape:',quantized.shape)
+
+		# print(quantized.shape)
+		# quit()
+		# quantized = quantized.unsqueeze(-1).repeat(1, 1, *input.shape[-1:])
 
 		avg_probs = torch.mean(encodings, dim=0)
 		perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
@@ -424,12 +437,17 @@ class LatentActionGen(nn.Module):
             Block(768, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
             for i in range(4)])
 	
-	def forward(self, s0, s1):
+	def forward(self, s0, s1, pos_embed_set):
+		# add positional embedding
+		s1_=s1
+		s0=s0+pos_embed_set[:,0:197,:]
+		s1=s1+pos_embed_set[:,200:397,:]
 		s01 = torch.cat([s0, s1], dim=1)
 		x=s01
-		for block in self.blocks:
-			x=block(x)
-		x=x[:,:1,:]
+		# for block in self.blocks:
+		# 	x=block(x)
+		# x=x[:,-197:,:]
+		x=s1_
 
 		# x = self.conv(s01)
 		# x = self.bn(x)
@@ -438,6 +456,9 @@ class LatentActionGen(nn.Module):
 		# 	x = block(x)
 		# x = self.conv_out(x)
 		z, loss, perplexity, encodings = self.quantizer(x)
+		# z=x
+		# print(z.shape)
+		# quit()
 		# print('perp:', perplexity)
 		return z, loss, perplexity
 
@@ -462,16 +483,23 @@ class Dynamic(nn.Module):
             Block(768, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
             for i in range(4)])
 	
-	def forward(self, s, z):
+	def forward(self, s, z, pos_embed_set):
+		# add positional embedding
+		z_=z
+		z_shape=z.shape
+		s=s+pos_embed_set[:,0:197,:]
+		z=z+pos_embed_set[:,400:400+z_shape[1],:]
 		sz = torch.cat([s, z], dim=1)
 		x=sz
-		for block in self.blocks:
-			x=block(x)
+		# for block in self.blocks:
+		# 	x=block(x)
+
 		# # if 4 frames stack
 		# x=x[:,:197*4,:]
 		
 		# if single frame
-		x=x[:,:197,:]
+		x=x[:,-197:,:]
+		x=z_
 
 		# x = self.conv(sz)
 		# x = self.bn(x)
