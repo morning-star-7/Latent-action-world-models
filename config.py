@@ -52,7 +52,7 @@ class Config:
 		self.state_shape = (64, 6, 6)
 		self.state_size = self.state_shape[1] * self.state_shape[2]
 		
-		self.latent_action_channel = 768
+		self.latent_action_channel = 64
 		self.num_embeddings = 512
 		self.state_norm = args.state_norm
 		

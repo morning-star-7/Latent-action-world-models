@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from tools import AddGaussianNoise
-from model import Projector, Projector2, Decoder, LatentActionGen, Dynamic, conv3x3
+from model import Projector, Projector2, Decoder, LatentActionGen, Dynamic, conv3x3, VQVAE
 from transform import Transforms
 import os
 import random
@@ -28,10 +28,18 @@ from util.pos_embed import get_2d_sincos_pos_embed
 
 
 pyplot_cnt = 0
-# imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
-# imagenet_std = torch.tensor([0.229, 0.224, 0.225])
-# imagenet_mean=imagenet_mean.to(config.device)
-# imagenet_std=imagenet_std.to(config.device)
+
+# set random seed 
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = True
+
+
 
 # set random seed 
 def setup_seed(seed):
@@ -59,6 +67,9 @@ class Model(nn.Module):
 		self.decoder = Decoder()
 		self.model_mae= prepare_model(chkpt_dir='./mae_visualize_vit_base.pth', arch='mae_vit_base_patch16',device=config.device)
 		self.model_mae.requires_grad_(False)
+		# freeze mae encoder parameters
+		# self.model_mae.blocks.requires_grad_(False)
+		# self.model_mae.decoder_blocks.requires_grad_(False)
 		self.lag = LatentActionGen(config.num_embeddings,
 		                           num_channels,
 		                           config.latent_action_channel,
@@ -104,11 +115,15 @@ class Model(nn.Module):
 			nn.Linear(self.pred_hid, self.pred_out),
 		)
 		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, 768), requires_grad=False)  # fixed sin-cos embedding
+		self.produced_latent = nn.Parameter(torch.zeros(config.batch_size, 197, 768))
+		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, 16, 768))
 		self.initial_weight()
 
 	def initial_weight(self):
 		pos_embed_set = get_2d_sincos_pos_embed(768, int(28), cls_token=True)
-		self.pos_embed_set.data.copy_(torch.from_numpy(pos_embed_set).float().unsqueeze(0))		
+		self.pos_embed_set.data.copy_(torch.from_numpy(pos_embed_set).float().unsqueeze(0))	
+		torch.nn.init.normal_(self.produced_latent, std=.02)
+		torch.nn.init.normal_(self.latent_diff, std=.02)	
 
 	def set_optimizer(self, lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay):
 		if config.optim is optim.SGD:
@@ -334,7 +349,7 @@ class Model(nn.Module):
 		obs0_ = torch.einsum('nchw->nhwc', obs0[:, -3:]).detach().cpu()
 		_obs1_ = torch.einsum('nchw->nhwc', _obs1).detach().cpu()
 		obs1_ = torch.einsum('nchw->nhwc', obs1[:, -3:]).detach().cpu()
-		plt.rcParams['figure.figsize'] = [24, 24]
+		# plt.rcParams['figure.figsize'] = [24, 24]
 		plt.subplot(1, 4, 1)
 		show_image(obs0_[0], "obs_0")
 		plt.subplot(1, 4, 2)
@@ -344,7 +359,8 @@ class Model(nn.Module):
 		plt.subplot(1, 4, 4)
 		show_image(_obs1_[0], "recon_1")
 		plt.show()
-		plt.savefig('test_.png')
+		plt.savefig('test_16.png')
+		plt.close()
 
 
 	def forward(self,obs0,obs1):
@@ -375,8 +391,8 @@ class Model(nn.Module):
 				s0 = s0.detach()
 				s1 = s1.detach()
 			
-			z, loss_lag, perp = self.lag(s0, s1, self.pos_embed_set)
-			_s1 = self.dynamic(s0, z, self.pos_embed_set)
+			z, loss_lag, perp = self.lag(s0, s1, self.pos_embed_set, self.latent_diff)
+			_s1 = self.dynamic(s0, z, self.pos_embed_set,self.produced_latent)
 
 
 			# # if 4 frames stack
@@ -409,9 +425,9 @@ class Model(nn.Module):
 
 
 		# total loss
-		loss =  loss_lag + loss_repr_dyn
+		loss =  loss_lag + loss_dyna # + loss_repr_dyn
 		# loss=loss_lag
-		print('%.5f %.5f %.5f' % (loss_repr_dyn, loss_dyna, loss_lag))
+		# print('%.5f %.5f %.5f' % (loss_repr_dyn, loss_dyna, loss_lag))
 		return loss
 
 	
@@ -464,53 +480,131 @@ def set_optimizer(lr=config.lr, momentum=config.momentum, weight_decay=config.we
 		raise NotImplementedError(str(config.optim))
 
 
+def hook_f(grad):
+	print(grad)
+
+
+def training_curve(epoch_loss):
+    n=len(epoch_loss)
+    index=range(n)
+    plt.plot(index,epoch_loss,label='train loss')
+    plt.xlabel("iterations/10")
+    plt.ylabel("loss")
+    plt.ylim(0, 0.5)
+    # plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    plt.legend()
+    plt.title('freeze encoder and decoder')
+    plt.savefig('./train loss_16.jpg')
+    plt.close()
+
+
 def train_epoch(model, dataset, optimizer,sampler):
+	loss_curve=[]
+	cnt = 0
+	for i in range(50):
+		model.train()
+		data_loader = get_data_loader(dataset,sampler)
+		for data in data_loader:
+			print(cnt)
+			# print(data.shape)
+			# (obs0, obs1), action, reward = data
+			obs0, obs1 =data
+			obs0 = obs0.type(torch.float32).to(config.device) / 255
+			obs1 = obs1.type(torch.float32).to(config.device) / 255
+
+
+			# normalize
+			imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
+			imagenet_std = torch.tensor([0.229, 0.224, 0.225])
+			obs0 = torch.einsum('nchw->nhwc', obs0)
+			obs1 = torch.einsum('nchw->nhwc', obs1)
+			imagenet_mean=imagenet_mean.to(config.device)
+			imagenet_std=imagenet_std.to(config.device)
+			obs0=obs0-imagenet_mean
+			obs0=obs0/imagenet_std
+			obs1=obs1-imagenet_mean
+			obs1=obs1/imagenet_std
+			obs0 = torch.einsum('nhwc->nchw', obs0)
+			obs1 = torch.einsum('nhwc->nchw', obs1)
+
+			
+			# model. optim.zero_grad()
+			optimizer.zero_grad()
+			
+
+
+			# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
+			# print('#', loss)
+			obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
+			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+			# model.module.latent_diff.register_hook(hook_f)
+			# model.module.produced_latent.register_hook(hook_f)
+			# model.module.lag.parameters().register_hook(hook_f)
+			loss.mean().backward()
+			# for p in [
+			# 	model.module.lag.parameters(),
+			# 	model.module.model_mae.decoder_blocks.parameters(),
+			# 	model.module.latent_diff,
+			# 	model.module.produced_latent,
+			# 	model.module.model_mae.blocks.parameters(),
+			# 	# model.module.model_mae.decoder_embed.parameters(),
+			# 	# model.module.model_mae.decoder_norm.parameters(),
+			# 	# model.module.model_mae.decoder_pred.parameters(),
+			# 	model.module.dynamic.parameters()]:
+			# 	total_norm = nn.utils.clip_grad_norm_(p, max_norm=5.0)
+			# 	print('grad_norm:', total_norm)
+			# for parms in model.module.latent_diff: 
+			# 	print('-->name:', 'name', '-->grad_requirs:',parms.requires_grad, \
+			# 	' -->grad_value:',parms.grad, 'if leaf node:',parms.is_leaf)
+			optimizer.step()
+			if cnt % 10 ==0:
+				loss_curve.append(loss.mean().item())
+				training_curve(loss_curve)
+			if cnt % 20 ==0:
+				model.module.visualize(obs0,_obs0,obs1,_obs1)
+				# model.module.visualize_embedding(obs0, obs1)
+				# break
+			cnt += 1
+			print('##', loss.mean().item())
+
+
+def vqvae_recons(origin,recon,latent_recon):
+	origin = torch.einsum('nchw->nhwc', origin).detach().cpu()
+	recon = torch.einsum('nchw->nhwc', recon).detach().cpu()
+	latent_recon = torch.einsum('nchw->nhwc', latent_recon).detach().cpu()	
+	plt.rcParams['figure.figsize'] = [24, 24]
+	plt.subplot(1, 3, 1)
+	show_image(origin[0], "origin")
+	plt.subplot(1, 3, 2)
+	show_image(recon[0], "quantize recon")
+	plt.subplot(1, 3, 3)
+	show_image(latent_recon[0], "latent recon")
+	plt.savefig('vqvae_recon.png')
+
+def vqvae_train_epoch(model, dataset, optimizer,sampler):
 	model.train()
 	data_loader = get_data_loader(dataset,sampler)
 	cnt = 0
 	for data in data_loader:
 		print(cnt)
-		# print(data.shape)
-		# (obs0, obs1), action, reward = data
 		obs0, obs1 =data
 		obs0 = obs0.type(torch.float32).to(config.device) / 255
-		obs1 = obs1.type(torch.float32).to(config.device) / 255
-
-
-		# normalize
-		# obs0 = torch.einsum('nchw->nhwc', obs0)
-		# obs1 = torch.einsum('nchw->nhwc', obs1)
-		# obs0=obs0-imagenet_mean
-		# obs0=obs0/imagenet_std
-		# obs1=obs1-imagenet_mean
-		# obs1=obs1/imagenet_std
-		# obs0 = torch.einsum('nhwc->nchw', obs0)
-		# obs1 = torch.einsum('nhwc->nchw', obs1)
-
-		
-		# model. optim.zero_grad()
+		obs1 = obs1.type(torch.float32).to(config.device) / 255	
 		optimizer.zero_grad()
-		
-
-
 		cnt += 1
-		# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
-		# print('#', loss)
-		obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
-		loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
-		loss.mean().backward()
+		results,latent_recon=model(obs0)
+		loss=model.module.loss_function(*results)
+		loss.backward()
 		for p in [
-			model.module.lag.parameters(),
-			model.module.dynamic.parameters()]:
+			model.module.encoder.parameters(),
+			model.module.decoder.parameters(),
+			model.module.vq_layer.parameters()]:
 			total_norm = nn.utils.clip_grad_norm_(p, max_norm=1.0)
 			# print('grad_norm:', total_norm)
 		optimizer.step()
-		if cnt % 20 ==0:
-			model.module.visualize(obs0,_obs0,obs1,_obs1)
-			# model.module.visualize_embedding(obs0, obs1)
-			# break
+		if cnt % 50 ==0:
+			vqvae_recons(results[1],results[0],latent_recon)
 		print('##', loss.mean().item())
-		
 
 
 def get_train_dataset(subdir, block_id):
@@ -524,54 +618,49 @@ def get_tune_dataset():
 
 
 def pretrain():
+	# setup random seed
+	setup_seed(666)
 
 	# distributed training initialize
 	torch.distributed.init_process_group(backend="nccl")
 	local_rank=torch.distributed.get_rank()
 	torch.cuda.set_device(local_rank)
 	config.device= torch.device("cuda",local_rank)
-	# print(local_rank)
-	# print(config.device)
-	# quit()
+
 
 	row_image_transform = transforms.Compose([
-		transforms.CenterCrop(224)
+		transforms.RandomCrop(224,pad_if_needed=True)
 	])
 	transform = Transforms()
 	model = Model('ssae', transform=transform)
-	# chkpt_dir = './mae_visualize_vit_base.pth'
-	# model_mae = prepare_model(chkpt_dir, 'mae_vit_base_patch16')
-	# print('Model loaded.')
-	# for name,parameters in model.named_parameters():
-	# 	print(name,':',parameters.size())
+	# model=VQVAE(in_channels=3,embedding_dim=64,num_embeddings=512)
+	# for name,parameters in model.model_mae.named_parameters():
+	# 	print(name)
+	# # print(model)
 	# quit()
 
-	# # if nn.Dataparallel
-	# if torch.cuda.device_count() > 1:
-	# 	print("Let's use", torch.cuda.device_count(), "GPUs!")
-	# 	model = nn.DataParallel(model) # device_ids=[0]
 
 	model.to(config.device)
 	model=nn.SyncBatchNorm.convert_sync_batchnorm(model)
 	model=torch.nn.parallel.DistributedDataParallel(model,broadcast_buffers=True, find_unused_parameters=True)
 	# broadcast_buffers=False ???????
-	model.module.set_optimizer()
+	# model.module.set_optimizer()
 	# set_optimizer()
-	optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay)
-	
+	# optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay)
+	optimizer = optim.Adam(model.parameters(), lr=0.0003)
 	# model.restore()
-	model.module.save()
+	# model.module.save()
 	# exit(0)
 	
-	log.set_model(model.module.name)
-	log_setting()
+	# log.set_model(model.module.name)
+	# log_setting()
 
 	
 	# tune_dataset = get_tune_dataset()
 	# # state_reconstruct_test(model, tune_dataset)
 	# action_regress_test(model, tune_dataset)
 	# del tune_dataset
-	config.freeze_encoder_stat = True
+	# config.freeze_encoder_stat = True
 	
 	cnt = 0
 	subdir, block_id = 1, 25
@@ -586,9 +675,10 @@ def pretrain():
 		# train_dataset = get_train_dataset(subdir, block_id)
 		# train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
 		train_epoch(model, train_dataset,optimizer,sampler)
+		# vqvae_train_epoch(model, train_dataset,optimizer,sampler)
 		# del train_dataset
 		
-		model.module.save()
+		# model.module.save()
 		
 		# tune_dataset = get_tune_dataset()
 		# # state_reconstruct_test(model, tune_dataset)

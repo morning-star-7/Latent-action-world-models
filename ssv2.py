@@ -33,8 +33,13 @@ class ssv2Dataset(Dataset):
         for i in range(1):
             obs0_img=read_image(os.path.join(image_file,images_path[i]))
             obs1_img=read_image(os.path.join(image_file,images_path[i+4]))
-            obs0_img=self.transform(obs0_img).numpy()
-            obs1_img=self.transform(obs1_img).numpy()
+            obs01=torch.cat([obs0_img,obs1_img],dim=0)
+            # print(obs01.shape)
+            obs01=self.transform(obs01).numpy()
+            # obs0_img=self.transform(obs0_img).numpy()
+            # obs1_img=self.transform(obs1_img).numpy()
+            obs0_img=obs01[0:3]
+            obs1_img=obs01[3:6]
             obs0[i*3:i*3+3]=obs0_img
             obs1[i*3:i*3+3]=obs1_img
 
@@ -43,19 +48,21 @@ class ssv2Dataset(Dataset):
 
 # def main():
 #     row_image_transform = transforms.Compose([
-# 		transforms.CenterCrop(224)
+# 		transforms.RandomCrop(224,pad_if_needed=True)
 # 	])
 #     image_path='/home/chc/dataset/ssv2_extracted_frames_5'
-#     dataset=ssv2Dataset(image_path=image_path,transform=row_image_transform,cut=100)
-#     # for i in range(10):
-#     obs0, obs1=dataset[0]
+#     dataset=ssv2Dataset(image_path=image_path,transform=row_image_transform,cut=None)
+#     for i in range(len(dataset)):
+#         obs0, obs1=dataset[i]
+#         print(i)
 #     print(obs1.shape)
+#     print(len(dataset))
 #     quit()
 #     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
 #     axs[0, 0].imshow(obs0[0:3].T)
-#     axs[0, 1].imshow(obs0[3:6].T)
-#     axs[1, 0].imshow(obs0[6:9].T)
-#     axs[1, 1].imshow(obs0[6:9].T)
+#     axs[0, 1].imshow(obs1[0:3].T)
+#     axs[1, 0].imshow(obs0[0:3].T)
+#     axs[1, 1].imshow(obs1[0:3].T)
 #     fig.savefig('visualize_ss.png')
 
 

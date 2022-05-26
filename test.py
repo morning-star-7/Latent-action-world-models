@@ -25,7 +25,8 @@ def show_image1(image, title=''):
 def show_image(image, title=''):
     # image is [H, W, 3]
     assert image.shape[2] == 3
-    plt.imshow(torch.clip((image) * 255, 0, 255).int())
+    plt.imshow(torch.clip((image * imagenet_std + imagenet_mean) * 255, 0, 255).int())
+    # plt.imshow(torch.clip((image) * 255, 0, 255).int())
     # plt.imshow(image)
     plt.title(title, fontsize=16)
     plt.axis('off')
