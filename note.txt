@@ -15,3 +15,9 @@ Optimization
     in your application as needed.
     dataloader number of thread
 (3) visualization img_show: mean and varience process
+
+
+Training note
+node 58: 4-dim 22 
+node 59: 4-dim 62
+node 60: 4-dim 42

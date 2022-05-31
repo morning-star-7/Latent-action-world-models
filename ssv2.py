@@ -12,13 +12,18 @@ from matplotlib import pyplot as plt
 import shutil
 
 class ssv2Dataset(Dataset):
-    def __init__(self,image_path,transform=None, cut=None):
+    def __init__(self,image_path,transform=None, mode='train',cut=None):
         self.image_path=image_path
         self.transform=transform
         self.cut=cut
+        self.mode=mode
         self.files=os.listdir(self.image_path)
         if self.cut is not None:
             self.files=self.files[:self.cut]
+        if self.mode=='train':
+            self.files=self.files[:200000]
+        elif self.mode=='eval':
+            self.files=self.files[-1000:]
 
     
     def __len__(self):

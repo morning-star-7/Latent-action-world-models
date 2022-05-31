@@ -8,42 +8,25 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import models_mae
-# from config import config
+
 
 
 imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
 
-def show_image1(image, title=''):
-    # image is [H, W, 3]
-    assert image.shape[2] == 3
-    plt.imshow(torch.clip((image * imagenet_std + imagenet_mean) * 255, 0, 255).int())
-    plt.title(title, fontsize=16)
-    plt.axis('off')
-    return
-
-def show_latent_diff(latent_mse,title=''):
-    plt.imshow(latent_mse)
-    plt.colorbar(fraction=0.046, pad=0.04)
-    plt.title(title,fontsize=16)
-    plt.axis('off')
-    return
-
 def show_image(image, title=''):
     # image is [H, W, 3]
     assert image.shape[2] == 3
     plt.imshow(torch.clip((image * imagenet_std + imagenet_mean) * 255, 0, 255).int())
-    # plt.imshow(torch.clip((image) * 255, 0, 255).int())
-    # plt.imshow(image)
     plt.title(title, fontsize=16)
     plt.axis('off')
     return
 
-def prepare_model(chkpt_dir, device,arch='mae_vit_base_patch16'):
+def prepare_model(chkpt_dir, arch='mae_vit_base_patch16'):
     # build model
     model = getattr(models_mae, arch)()
     # load model
-    checkpoint = torch.load(chkpt_dir, map_location=device)
+    checkpoint = torch.load(chkpt_dir, map_location='cuda:0')
     msg = model.load_state_dict(checkpoint['model'], strict=False)
     print(msg)
     return model
@@ -92,26 +75,26 @@ def run_one_image(img, model):
     plt.show()
     plt.savefig('test_image.png')
 
-# # load an image
-# img_url = 'https://user-images.githubusercontent.com/11435359/147738734-196fd92f-9260-48d5-ba7e-bf103d29364d.jpg' # fox, from ILSVRC2012_val_00046145
-# # img_url = 'https://user-images.githubusercontent.com/11435359/147743081-0428eecf-89e5-4e07-8da5-a30fd73cc0ba.jpg' # cucumber, from ILSVRC2012_val_00047851
-# img = Image.open(requests.get(img_url, stream=True).raw)
-# img = img.resize((224, 224))
-# img = np.array(img) / 255.
+# load an image
+img_url = 'https://user-images.githubusercontent.com/11435359/147738734-196fd92f-9260-48d5-ba7e-bf103d29364d.jpg' # fox, from ILSVRC2012_val_00046145
+# img_url = 'https://user-images.githubusercontent.com/11435359/147743081-0428eecf-89e5-4e07-8da5-a30fd73cc0ba.jpg' # cucumber, from ILSVRC2012_val_00047851
+img = Image.open(requests.get(img_url, stream=True).raw)
+img = img.resize((224, 224))
+img = np.array(img) / 255.
 
-# assert img.shape == (224, 224, 3)
+assert img.shape == (224, 224, 3)
 
-# # normalize by ImageNet mean and std
-# img = img - imagenet_mean
-# img = img / imagenet_std
+# normalize by ImageNet mean and std
+img = img - imagenet_mean
+img = img / imagenet_std
 
-# plt.rcParams['figure.figsize'] = [5, 5]
-# show_image(torch.tensor(img))
+plt.rcParams['figure.figsize'] = [5, 5]
+show_image(torch.tensor(img))
 
-# chkpt_dir = './mae_visualize_vit_base.pth'
-# model_mae = prepare_model(chkpt_dir, 'mae_vit_base_patch16')
-# print('Model loaded.')
+chkpt_dir = './checkpoint-399.pth'
+model_mae = prepare_model(chkpt_dir, 'mae_vit_small_patch16')
+print('Model loaded.')
 
-# torch.manual_seed(2)
-# print('MAE with pixel reconstruction:')
-# run_one_image(img, model_mae)
+torch.manual_seed(2)
+print('MAE with pixel reconstruction:')
+run_one_image(img, model_mae)

@@ -22,7 +22,7 @@ from model import Projector, Projector2, Decoder, LatentActionGen, Dynamic, conv
 from transform import Transforms
 import os
 import random
-from test import prepare_model, show_image
+from test import prepare_model, show_image, show_latent_diff
 from util.pos_embed import get_2d_sincos_pos_embed
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -116,7 +116,7 @@ class Model(nn.Module):
 		)
 		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, 768), requires_grad=False)  # fixed sin-cos embedding
 		self.produced_latent = nn.Parameter(torch.zeros(config.batch_size, 197, 768))
-		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, 16, 768))
+		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, 4, 768))
 		self.initial_weight()
 
 	def initial_weight(self):
@@ -341,7 +341,7 @@ class Model(nn.Module):
 		x=self.model_mae.forward_decoder(x,ids_restore)
 		return x
 
-	def visualize(self,obs0,_obs0,obs1,_obs1):
+	def visualize(self,obs0,_obs0,obs1,_obs1,s1, _s1,cnt=0):
 		# s0,mask0,ids_restore0=self.mae_encoder_forward(obs0)
 		# _obs0=self.mae_decoder_forward(s0,ids_restore0)
 		# _obs0=self.model_mae.unpatchify(_obs0)
@@ -349,17 +349,21 @@ class Model(nn.Module):
 		obs0_ = torch.einsum('nchw->nhwc', obs0[:, -3:]).detach().cpu()
 		_obs1_ = torch.einsum('nchw->nhwc', _obs1).detach().cpu()
 		obs1_ = torch.einsum('nchw->nhwc', obs1[:, -3:]).detach().cpu()
+		latent_mse=((s1[0]-_s1[0])**2).mean(dim=-1)
+		latent_mse=latent_mse[1:].reshape(14,14).detach().cpu()
 		# plt.rcParams['figure.figsize'] = [24, 24]
-		plt.subplot(1, 4, 1)
+		plt.subplot(1, 5, 1)
 		show_image(obs0_[0], "obs_0")
-		plt.subplot(1, 4, 2)
+		plt.subplot(1, 5, 2)
 		show_image(_obs0_[0], "recon_0")
-		plt.subplot(1, 4, 3)
+		plt.subplot(1, 5, 3)
 		show_image(obs1_[0], "obs_1")
-		plt.subplot(1, 4, 4)
+		plt.subplot(1, 5, 4)
 		show_image(_obs1_[0], "recon_1")
+		plt.subplot(1,5,5)
+		show_latent_diff(latent_mse=latent_mse, title="s_mse")
 		plt.show()
-		plt.savefig('test_16.png')
+		plt.savefig('./eval_visualization_4/test_4_42_'+str(cnt)+'.png')
 		plt.close()
 
 
@@ -484,27 +488,72 @@ def hook_f(grad):
 	print(grad)
 
 
-def training_curve(epoch_loss):
-    n=len(epoch_loss)
-    index=range(n)
-    plt.plot(index,epoch_loss,label='train loss')
-    plt.xlabel("iterations/10")
-    plt.ylabel("loss")
-    plt.ylim(0, 0.5)
-    # plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
-    plt.legend()
-    plt.title('freeze encoder and decoder')
-    plt.savefig('./train loss_16.jpg')
-    plt.close()
+def training_curve(epoch_loss,mode):
+	n=len(epoch_loss)
+	index=range(n)
+	if mode=='train':
+		plt.plot(index,epoch_loss,label='train loss')
+		plt.xlabel("iterations/10")
+		plt.ylabel("loss")
+		plt.ylim(0, 0.5)
+		# plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+		plt.legend()
+		plt.title('freeze encoder and decoder')
+		plt.savefig('./train loss_4_42.jpg')
+		plt.close()
+	elif mode=='eval':
+		plt.plot(index,epoch_loss,label='eval loss')
+		plt.xlabel("epoch")
+		plt.ylabel("loss")
+		plt.ylim(0, 0.5)
+		# plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+		plt.legend()
+		plt.title('freeze encoder and decoder')
+		plt.savefig('./evaluation loss_4_42.jpg')
+		plt.close()
 
 
-def train_epoch(model, dataset, optimizer,sampler):
+def evaluation(model,eval_dataset,eval_sampler):
+	cnt=0
+	model.eval()
+	eval_loss_sum=0
+	eval_data_loader=get_data_loader(eval_dataset,eval_sampler)
+	for data in eval_data_loader:
+		cnt+=1
+		obs0, obs1 =data
+		obs0 = obs0.type(torch.float32).to(config.device) / 255
+		obs1 = obs1.type(torch.float32).to(config.device) / 255
+		# normalize
+		imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
+		imagenet_std = torch.tensor([0.229, 0.224, 0.225])
+		obs0 = torch.einsum('nchw->nhwc', obs0)
+		obs1 = torch.einsum('nchw->nhwc', obs1)
+		imagenet_mean=imagenet_mean.to(config.device)
+		imagenet_std=imagenet_std.to(config.device)
+		obs0=obs0-imagenet_mean
+		obs0=obs0/imagenet_std
+		obs1=obs1-imagenet_mean
+		obs1=obs1/imagenet_std
+		obs0 = torch.einsum('nhwc->nchw', obs0)
+		obs1 = torch.einsum('nhwc->nchw', obs1)
+		with torch.no_grad():
+			obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
+			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+		eval_loss_sum+=loss.mean().item()
+		if cnt%3==1:
+			model.module.visualize(obs0,_obs0,obs1,_obs1,s1, _s1,cnt)
+	return eval_loss_sum/cnt
+
+
+
+def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
 	loss_curve=[]
+	eval_loss_curve=[]
 	cnt = 0
 	for i in range(50):
-		model.train()
 		data_loader = get_data_loader(dataset,sampler)
 		for data in data_loader:
+			model.train()
 			print(cnt)
 			# print(data.shape)
 			# (obs0, obs1), action, reward = data
@@ -559,11 +608,17 @@ def train_epoch(model, dataset, optimizer,sampler):
 			optimizer.step()
 			if cnt % 10 ==0:
 				loss_curve.append(loss.mean().item())
-				training_curve(loss_curve)
+				training_curve(loss_curve,mode='train')
 			if cnt % 20 ==0:
-				model.module.visualize(obs0,_obs0,obs1,_obs1)
+				# model.module.visualize(obs0,_obs0,obs1,_obs1)
+				a=1
 				# model.module.visualize_embedding(obs0, obs1)
 				# break
+			if cnt % 30 ==0:
+				print('start evaluation')
+				eval_loss=evaluation(model,eval_dataset=eval_dataset,eval_sampler=eval_sampler)
+				eval_loss_curve.append(eval_loss)
+				training_curve(eval_loss_curve,mode='eval')
 			cnt += 1
 			print('##', loss.mean().item())
 
@@ -666,15 +721,17 @@ def pretrain():
 	subdir, block_id = 1, 25
 	# lr_schedule = [0.0001, 0.001, 0.01, 0.0333, 0.0666, 0.1, 0.2, 0.4, 0.8, 1.0]
 
-	train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
+	train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
+	eval_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='eval')
 	sampler=DistributedSampler(train_dataset)
+	eval_sampler=DistributedSampler(eval_dataset)
 	while True:
 		# if subdir == 1 and block_id < len(lr_schedule):
 		# 	model.set_optimizer(config.lr * lr_schedule[block_id])
 		
 		# train_dataset = get_train_dataset(subdir, block_id)
 		# train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
-		train_epoch(model, train_dataset,optimizer,sampler)
+		train_epoch(model, train_dataset,optimizer,sampler,eval_dataset,eval_sampler)
 		# vqvae_train_epoch(model, train_dataset,optimizer,sampler)
 		# del train_dataset
 		
