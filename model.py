@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+from torch import nn, pinverse
 import torch.nn.functional as F
 import numpy as np
 from config import config
@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from torch import optim
 from timm.models.vision_transformer import PatchEmbed, Block
 from typing import List, Callable, Union, Any, TypeVar, Tuple
+import torch.distributed as dist
 
 Tensor = TypeVar('torch.tensor')
 
@@ -425,12 +426,201 @@ class VectorQuantizer1D(nn.Module):
 		return quantized, loss, perplexity, encodings
 
 
+
+class BottleneckBlock(nn.Module):
+	def __init__(self, k_bins, emb_width, mu):
+		super().__init__()
+		self.k_bins = k_bins
+		self.emb_width = emb_width
+		self.mu = mu
+		self.reset_k()
+		self.threshold = 1.0
+
+	def reset_k(self):
+		self.init = False
+		self.k_sum = None
+		self.k_elem = None
+		self.register_buffer('k', torch.zeros(self.k_bins, self.emb_width).cuda())
+
+	def _tile(self, x):
+		d, ew = x.shape
+		if d < self.k_bins:
+			n_repeats = (self.k_bins + d - 1) // d
+			std = 0.01 / np.sqrt(ew)
+			x = x.repeat(n_repeats, 1)
+			x = x + torch.randn_like(x) * std
+		return x
+
+	def init_k(self, x):
+		mu, emb_width, k_bins = self.mu, self.emb_width, self.k_bins
+		self.init = True
+		# init k_w using random vectors from x
+		y = self._tile(x)
+		_k_rand = y[torch.randperm(y.shape[0])][:k_bins]
+		dist.broadcast(_k_rand, 0)
+		self.k = _k_rand
+		assert self.k.shape == (k_bins, emb_width)
+		self.k_sum = self.k
+		self.k_elem = torch.ones(k_bins, device=self.k.device)
+
+	def restore_k(self, num_tokens=None, threshold=1.0):
+		mu, emb_width, k_bins = self.mu, self.emb_width, self.k_bins
+		self.init = True
+		assert self.k.shape == (k_bins, emb_width)
+		self.k_sum = self.k.clone()
+		self.k_elem = torch.ones(k_bins, device=self.k.device)
+		if num_tokens is not None:
+			expected_usage = num_tokens / k_bins
+			self.k_elem.data.mul_(expected_usage)
+			self.k_sum.data.mul_(expected_usage)
+		self.threshold = threshold
+
+	def update_k(self, x, x_l):
+		mu, emb_width, k_bins = self.mu, self.emb_width, self.k_bins
+		with torch.no_grad():
+			# Calculate new centres
+			x_l_onehot = torch.zeros(k_bins, x.shape[0], device=x.device)  # k_bins, N * L
+			x_l_onehot.scatter_(0, x_l.view(1, x.shape[0]), 1)
+
+			_k_sum = torch.matmul(x_l_onehot, x)  # k_bins, w
+			_k_elem = x_l_onehot.sum(dim=-1)  # k_bins
+			y = self._tile(x)
+			_k_rand = y[torch.randperm(y.shape[0])][:k_bins]
+
+			dist.broadcast(_k_rand, 0)
+			dist.all_reduce(_k_sum)
+			dist.all_reduce(_k_elem)
+
+			# Update centres
+			old_k = self.k
+			self.k_sum = mu * self.k_sum + (1. - mu) * _k_sum  # w, k_bins
+			self.k_elem = mu * self.k_elem + (1. - mu) * _k_elem  # k_bins
+			usage = (self.k_elem.view(k_bins, 1) >= self.threshold).float()
+			self.k = usage * (self.k_sum.view(k_bins, emb_width) / self.k_elem.view(k_bins, 1)) \
+					+ (1 - usage) * _k_rand
+			_k_prob = _k_elem / torch.sum(_k_elem)  # x_l_onehot.mean(dim=-1)  # prob of each bin
+			entropy = -torch.sum(_k_prob * torch.log(_k_prob + 1e-8))  # entropy ie how diverse
+			used_curr = (_k_elem >= self.threshold).sum()
+			usage = torch.sum(usage)
+			dk = torch.norm(self.k - old_k) / np.sqrt(np.prod(old_k.shape))
+		return dict(entropy=entropy,
+					used_curr=used_curr,
+					usage=usage,
+					dk=dk)
+
+	def preprocess(self, x):
+		# NCT -> NTC -> [NT, C]
+		# x = x.permute(0, 2, 1).contiguous()
+		# x = x.view(-1, x.shape[-1])  # x_en = (N * L, w), k_j = (w, k_bins)
+		x=x.contiguous().view(-1,self.emb_width)
+
+		if x.shape[-1] == self.emb_width:
+			prenorm = torch.norm(x - torch.mean(x)) / np.sqrt(np.prod(x.shape))
+		elif x.shape[-1] == 2 * self.emb_width:
+			x1, x2 = x[...,:self.emb_width], x[...,self.emb_width:]
+			prenorm = (torch.norm(x1 - torch.mean(x1)) / np.sqrt(np.prod(x1.shape))) + (torch.norm(x2 - torch.mean(x2)) / np.sqrt(np.prod(x2.shape)))
+
+			# Normalise
+			x = x1 + x2
+		else:
+			assert False, f"Expected {x.shape[-1]} to be (1 or 2) * {self.emb_width}"
+		return x, prenorm
+
+	def postprocess(self, x_l, x_d, x_shape):
+		# [NT, C] -> NTC -> NCT
+		N, T = x_shape
+		x_d = x_d.view(N, -1, T).contiguous()
+		# x_l = x_l.view(N, T)
+		return x_l, x_d
+
+	def quantise(self, x):
+		# Calculate latent code x_l
+		k_w = self.k.t()
+		distance = torch.sum(x ** 2, dim=-1, keepdim=True) - 2 * torch.matmul(x, k_w) + torch.sum(k_w ** 2, dim=0,
+																							keepdim=True)  # (N * L, b)
+		min_distance, x_l = torch.min(distance, dim=-1)
+		fit = torch.mean(min_distance)
+		return x_l, fit
+
+	def dequantise(self, x_l):
+		x = F.embedding(x_l, self.k)
+		return x
+
+	def encode(self, x):
+		N, width, T = x.shape
+
+		# Preprocess.
+		x, prenorm = self.preprocess(x)
+
+		# Quantise
+		x_l, fit = self.quantise(x)
+
+		# Postprocess.
+		x_l = x_l.view(N, T)
+		return x_l
+
+	def decode(self, x_l):
+		N, T = x_l.shape
+		width = self.emb_width
+
+		# Dequantise
+		x_d = self.dequantise(x_l)
+
+		# Postprocess
+		x_d = x_d.view(N, T, width).permute(0, 2, 1).contiguous()
+		return x_d
+
+	def forward(self, x, update_k=True):
+		# print(x.shape)
+		# quit()
+		N, width, T = x.shape # [4,4,768]
+
+		# Preprocess
+		x, prenorm = self.preprocess(x)
+		# print(x.shape)
+		# quit()
+
+		# Init k if not inited
+		if update_k and not self.init:
+			self.init_k(x)
+
+		# Quantise and dequantise through bottleneck
+		x_l, fit = self.quantise(x)
+		x_d = self.dequantise(x_l)
+
+		# Update embeddings
+		if update_k:
+			update_metrics = self.update_k(x, x_l)
+		else:
+			update_metrics = {}
+
+		# Loss
+		commit_loss = torch.norm(x_d.detach() - x) ** 2 / np.prod(x.shape)
+		q_loss = torch.norm(x_d - x.detach()) ** 2 / np.prod(x.shape)
+		# loss = q_loss + 0.02*commit_loss
+		loss = 0.02*commit_loss
+
+		# Passthrough
+		x_d = x + (x_d - x).detach()
+
+		# Postprocess
+		x_l, x_d = self.postprocess(x_l, x_d, (N,T))
+		# print('x_d shape:',x_d.shape)
+		# print('x_l shape:',x_l.shape)
+		# quit()
+		return x_l, x_d, loss, dict(fit=fit,
+										pn=prenorm,
+										**update_metrics)
+
+
+
 class LatentActionGen(nn.Module):
 	def __init__(self, num_embeddings, in_channel, embedding_channel, num_blocks):
 		super(LatentActionGen, self).__init__()
 		vq_in_channel = 5
 		# self.quantizer = VectorQuantizer(num_embeddings, embedding_channel * config.state_size, 0.1)
-		self.quantizer = VectorQuantizer1D(num_embeddings, 768, embedding_channel, 0.25)
+		self.quantizer = VectorQuantizer1D(num_embeddings, config.latent_dim, embedding_channel, 0.25)
+		self.bottleneck=BottleneckBlock(num_embeddings,embedding_channel,0.99)
 		self.conv = conv3x3(in_channel * 2, in_channel)
 		# self.conv = conv3x3(in_channel * 2, embedding_channel) # sample
 		self.bn = nn.BatchNorm2d(in_channel, momentum=config.bn_momentum)
@@ -440,8 +630,11 @@ class LatentActionGen(nn.Module):
 		)
 		self.conv_out = conv3x3(in_channel, vq_in_channel)
 		self.blocks = nn.ModuleList([
-            Block(768, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
+            Block(config.latent_dim, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
             for i in range(4)])
+		self.bottleneck_dim=config.latent_action_channel
+		self.linear_down=nn.Linear(config.latent_dim,self.bottleneck_dim)
+		self.linear_up=nn.Linear(self.bottleneck_dim,config.latent_dim)
 	
 	def forward(self, s0, s1, pos_embed_set, latent_diff):
 		# add positional embedding
@@ -454,6 +647,7 @@ class LatentActionGen(nn.Module):
 		for block in self.blocks:
 			x=block(x)
 		x=x[:,-latent_diff.shape[1]:,:]
+		x=self.linear_down(x)
 		# x=s1_
 
 		# x = self.conv(s01)
@@ -462,7 +656,10 @@ class LatentActionGen(nn.Module):
 		# for block in self.resblocks:
 		# 	x = block(x)
 		# x = self.conv_out(x)
-		z, loss, perplexity, encodings = self.quantizer(x)
+		# z, loss, perplexity, encodings = self.quantizer(x)
+		x_l,z,loss,dicts=self.bottleneck(x)
+		perplexity=None
+		z=self.linear_up(z)
 		# z=x
 		# print(z.shape)
 		# quit()
@@ -487,7 +684,7 @@ class Dynamic(nn.Module):
 			[ResidualBlock(s_channel, s_channel) for _ in range(num_blocks)]
 		)
 		self.blocks = nn.ModuleList([
-            Block(768, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
+            Block(config.latent_dim, 12, 4, qkv_bias=True,  norm_layer=nn.LayerNorm)
             for i in range(2)])
 	
 	def forward(self, s, z, pos_embed_set,produced_latent):

@@ -53,7 +53,8 @@ class Config:
 		self.state_size = self.state_shape[1] * self.state_shape[2]
 		
 		self.latent_action_channel = 64
-		self.num_embeddings = 512
+		self.num_embeddings = 256
+		self.latent_dim = 768
 		self.state_norm = args.state_norm
 		
 		self.max_dynamic_timestep = 5

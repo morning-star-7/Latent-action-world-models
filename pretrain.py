@@ -26,7 +26,7 @@ from test import prepare_model, show_image, show_latent_diff
 from util.pos_embed import get_2d_sincos_pos_embed
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-
+folder_name='./eval_visualization_RR_24_1loss_256_4_2_vitb'
 pyplot_cnt = 0
 
 # set random seed 
@@ -66,6 +66,9 @@ class Model(nn.Module):
 		                                     momentum=config.bn_momentum)
 		self.decoder = Decoder()
 		self.model_mae= prepare_model(chkpt_dir='./mae_visualize_vit_base.pth', arch='mae_vit_base_patch16',device=config.device)
+		# self.model_mae= prepare_model(chkpt_dir='./checkpoint-399.pth', arch='mae_vit_small_patch16',device=config.device)
+		self.latent_dim=config.latent_dim
+		self.latent_num=24
 		self.model_mae.requires_grad_(False)
 		# freeze mae encoder parameters
 		# self.model_mae.blocks.requires_grad_(False)
@@ -114,13 +117,13 @@ class Model(nn.Module):
 			nn.ReLU(),
 			nn.Linear(self.pred_hid, self.pred_out),
 		)
-		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, 768), requires_grad=False)  # fixed sin-cos embedding
-		self.produced_latent = nn.Parameter(torch.zeros(config.batch_size, 197, 768))
-		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, 4, 768))
+		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, self.latent_dim), requires_grad=False)  # fixed sin-cos embedding
+		self.produced_latent = nn.Parameter(torch.zeros(config.batch_size, 197, self.latent_dim))
+		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, self.latent_num, self.latent_dim))
 		self.initial_weight()
 
 	def initial_weight(self):
-		pos_embed_set = get_2d_sincos_pos_embed(768, int(28), cls_token=True)
+		pos_embed_set = get_2d_sincos_pos_embed(self.latent_dim, int(28), cls_token=True)
 		self.pos_embed_set.data.copy_(torch.from_numpy(pos_embed_set).float().unsqueeze(0))	
 		torch.nn.init.normal_(self.produced_latent, std=.02)
 		torch.nn.init.normal_(self.latent_diff, std=.02)	
@@ -363,7 +366,8 @@ class Model(nn.Module):
 		plt.subplot(1,5,5)
 		show_latent_diff(latent_mse=latent_mse, title="s_mse")
 		plt.show()
-		plt.savefig('./eval_visualization_4/test_4_42_'+str(cnt)+'.png')
+		plt.savefig(folder_name+'/test_4_42_'+str(cnt)+'.png')
+		# plt.savefig('./eval_visualization_48_42/test_4_42_'+str(cnt)+'.png')
 		plt.close()
 
 
@@ -397,6 +401,9 @@ class Model(nn.Module):
 			
 			z, loss_lag, perp = self.lag(s0, s1, self.pos_embed_set, self.latent_diff)
 			_s1 = self.dynamic(s0, z, self.pos_embed_set,self.produced_latent)
+			s1_out=_s1
+			# s1_out = self.dynamic(s0, z, self.pos_embed_set,self.produced_latent)
+			# _s1=s1_out+s0
 
 
 			# # if 4 frames stack
@@ -405,9 +412,9 @@ class Model(nn.Module):
 			# if single frame
 			_obs1=self.mae_decoder_forward(_s1,ids_restore1)
 			_obs1=self.model_mae.unpatchify(_obs1)			
-		return obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag
+		return obs0, obs1, _obs0, _obs1, s0, s1_out, s1, _s1, loss_lag
 
-	def calculate_loss(self, obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag):
+	def calculate_loss(self, obs0, obs1, _obs0, _obs1, s0, s1_out, s1, _s1, loss_lag):
 		# representation loss
 		# loss_func = nn.BCELoss(reduction='none')
 		loss_func = nn.MSELoss(reduction='none')
@@ -425,6 +432,9 @@ class Model(nn.Module):
 		loss_repr_dyn =F.mse_loss(_obs1,obs1)
 		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=1)).sqrt().mean()
 		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=(1,2))).sqrt().mean()
+
+		# s_diff=s1-s0
+		# loss_dyna = F.mse_loss(s1_out,s_diff)
 		loss_dyna = F.mse_loss(s1,_s1)
 
 
@@ -499,7 +509,8 @@ def training_curve(epoch_loss,mode):
 		# plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
 		plt.legend()
 		plt.title('freeze encoder and decoder')
-		plt.savefig('./train loss_4_42.jpg')
+		plt.savefig(folder_name+'/train loss_4_42.jpg')
+		# plt.savefig('./eval_visualization_48_42/train loss_4_42.jpg')
 		plt.close()
 	elif mode=='eval':
 		plt.plot(index,epoch_loss,label='eval loss')
@@ -509,7 +520,8 @@ def training_curve(epoch_loss,mode):
 		# plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
 		plt.legend()
 		plt.title('freeze encoder and decoder')
-		plt.savefig('./evaluation loss_4_42.jpg')
+		plt.savefig(folder_name+'/evaluation loss_4_42.jpg')
+		# plt.savefig('./eval_visualization_48_42/evaluation loss_4_42.jpg')
 		plt.close()
 
 
@@ -537,8 +549,8 @@ def evaluation(model,eval_dataset,eval_sampler):
 		obs0 = torch.einsum('nhwc->nchw', obs0)
 		obs1 = torch.einsum('nhwc->nchw', obs1)
 		with torch.no_grad():
-			obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
-			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+			obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1)
+			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag)
 		eval_loss_sum+=loss.mean().item()
 		if cnt%3==1:
 			model.module.visualize(obs0,_obs0,obs1,_obs1,s1, _s1,cnt)
@@ -584,8 +596,8 @@ def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
 
 			# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
 			# print('#', loss)
-			obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag=model(obs0, obs1)
-			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1, s1, _s1, loss_lag)
+			obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1)
+			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag)
 			# model.module.latent_diff.register_hook(hook_f)
 			# model.module.produced_latent.register_hook(hook_f)
 			# model.module.lag.parameters().register_hook(hook_f)
@@ -673,6 +685,9 @@ def get_tune_dataset():
 
 
 def pretrain():
+	folder=os.path.exists(folder_name)
+	if not folder:
+		os.makedirs(folder_name)
 	# setup random seed
 	setup_seed(666)
 
@@ -723,6 +738,8 @@ def pretrain():
 
 	train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
 	eval_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='eval')
+	# train_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
+	# eval_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='eval')
 	sampler=DistributedSampler(train_dataset)
 	eval_sampler=DistributedSampler(eval_dataset)
 	while True:
