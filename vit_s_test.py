@@ -8,8 +8,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import models_mae
+import lpips
 
-
+loss_fn_alex = lpips.LPIPS(net='alex') # best forward scores
+# loss_fn_vgg = lpips.LPIPS(net='vgg') # closer to "traditional" perceptual loss, when used for optimization
 
 imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
@@ -41,6 +43,11 @@ def run_one_image(img, model):
     # run MAE
     loss, y, mask = model(x.float(), mask_ratio=0)
     y = model.unpatchify(y)
+    _x=x.to(torch.float32)
+    _y=y.to(torch.float32)
+    d = loss_fn_alex(_x, _y)
+    print(d.item())
+    quit()
     y = torch.einsum('nchw->nhwc', y).detach().cpu()
 
     # visualize the mask

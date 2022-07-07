@@ -36,8 +36,12 @@ class ssv2Dataset(Dataset):
         obs0 = np.zeros((config.ss_frame_stack, *config.ss_observation_shape[1:]), dtype=np.uint8)
         obs1 = np.zeros((config.ss_frame_stack, *config.ss_observation_shape[1:]), dtype=np.uint8)
         for i in range(1):
-            obs0_img=read_image(os.path.join(image_file,images_path[i]))
-            obs1_img=read_image(os.path.join(image_file,images_path[i+4]))
+            # obs0_img=read_image(os.path.join(image_file,images_path[i]))
+            # obs1_img=read_image(os.path.join(image_file,images_path[i+4]))
+            obs0_img=torch.from_numpy(plt.imread(os.path.join(image_file,images_path[i])))
+            obs1_img=torch.from_numpy(plt.imread(os.path.join(image_file,images_path[i+4])))
+            obs0_img=torch.einsum('hwc->chw', obs0_img)
+            obs1_img=torch.einsum('hwc->chw', obs1_img)
             obs01=torch.cat([obs0_img,obs1_img],dim=0)
             # print(obs01.shape)
             obs01=self.transform(obs01).numpy()
@@ -55,14 +59,15 @@ class ssv2Dataset(Dataset):
 #     row_image_transform = transforms.Compose([
 # 		transforms.RandomCrop(224,pad_if_needed=True)
 # 	])
-#     image_path='/home/chc/dataset/ssv2_extracted_frames_5'
+#     # image_path='/home/chc/dataset/ssv2_extracted_frames_5'
+#     image_path='/public/share_dataset/ssv2_extracted_frames_5'
 #     dataset=ssv2Dataset(image_path=image_path,transform=row_image_transform,cut=None)
-#     for i in range(len(dataset)):
-#         obs0, obs1=dataset[i]
-#         print(i)
-#     print(obs1.shape)
+#     # for i in range(len(dataset)):
+#     #     obs0, obs1=dataset[i]
+#     #     print(i)
+#     # print(obs1.shape)
+#     obs0, obs1=dataset[10]
 #     print(len(dataset))
-#     quit()
 #     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
 #     axs[0, 0].imshow(obs0[0:3].T)
 #     axs[0, 1].imshow(obs1[0:3].T)

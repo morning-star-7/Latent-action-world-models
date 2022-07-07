@@ -1,6 +1,8 @@
+import imp
 import pickle
 from pickletools import optimize
 from pyexpat import model
+import matplotlib
 import torch
 from torch import nn
 from torch import optim
@@ -9,7 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tools import momentum_update
 from config import config
 import numpy as np
-from tools import log, log_setting, NT_Xent, renormalize, simsiam_distance, get_data_loader
+from tools import log, log_setting, NT_Xent, renormalize, simsiam_distance, get_data_loader, get_eval_data_loader
 import torch.nn.functional as F
 from atari import AtariDataset
 from ssv2 import ssv2Dataset
@@ -22,12 +24,89 @@ from model import Projector, Projector2, Decoder, LatentActionGen, Dynamic, conv
 from transform import Transforms
 import os
 import random
-from test import prepare_model, show_image, show_latent_diff
+from test import prepare_model, show_image, show_latent_diff,save_preprocess
 from util.pos_embed import get_2d_sincos_pos_embed
+import lpips
+from r3m import load_r3m
+from sklearn.metrics.pairwise import cosine_similarity
+import timm.optim.optim_factory as optim_factory
+import math
+from timm.optim import create_optimizer
+from timm.scheduler import create_scheduler
+import argparse
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-folder_name='./eval_visualization_RR_24_1loss_256_4_2_vitb'
+parser = argparse.ArgumentParser()
+parser.add_argument('--epochs', default=20, type=int)
+parser.add_argument('--opt', default='lamb', type=str, metavar='OPTIMIZER',
+					help='Optimizer (default: "adamw"')
+parser.add_argument('--opt-eps', default=1e-8, type=float, metavar='EPSILON',
+					help='Optimizer Epsilon (default: 1e-8)')
+parser.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
+					help='Optimizer Betas (default: None, use opt default)')
+parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
+					help='Clip gradient norm (default: None, no clipping)')
+parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
+					help='SGD momentum (default: 0.9)')
+parser.add_argument('--weight-decay', type=float, default=0.05,
+					help='weight decay (default: 0.05)')
+
+# Learning rate schedule parameters
+parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
+					help='LR scheduler (default: "cosine"')
+parser.add_argument('--lr', type=float, default=4e-3, metavar='LR',
+					help='learning rate (default: 5e-4)')
+parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
+					help='learning rate noise on/off epoch percentages')
+parser.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
+					help='learning rate noise limit percent (default: 0.67)')
+parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
+					help='learning rate noise std-dev (default: 1.0)')
+parser.add_argument('--warmup-lr', type=float, default=1e-6, metavar='LR',
+					help='warmup learning rate (default: 1e-6)')
+parser.add_argument('--min-lr', type=float, default=1e-5, metavar='LR',
+					help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+
+parser.add_argument('--decay-epochs', type=float, default=20, metavar='N',
+					help='epoch interval to decay LR')
+parser.add_argument('--warmup-epochs', type=int, default=2, metavar='N',
+					help='epochs to warmup LR, if scheduler supports')
+parser.add_argument('--cooldown-epochs', type=int, default=10, metavar='N',
+					help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
+parser.add_argument('--patience-epochs', type=int, default=10, metavar='N',
+					help='patience epochs for Plateau LR scheduler (default: 10')
+parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
+					help='LR decay rate (default: 0.1)')
+
+
+args = parser.parse_args()
+
+
+
+s0_mean=0.002
+s0_std=0.758
+s1_mean=0.001
+s1_std=0.752
+diff_mean=-0.001 # s1-s0
+diff_std=0.346
+
+
+s_mean=torch.tensor([     0.020,      0.031,     -0.014,     -0.119,      0.012,      0.023,     -0.040,     -0.046,     -0.046,     -0.085,      0.041,      0.064,      0.020,      0.019,      0.021,     -0.029,      0.011,      0.005,     -0.004,      0.067,      0.033,      0.003,     -0.038,     -0.029,     -0.023,     -0.022,      0.049,     -0.018,     -0.025,      0.016,     -0.008,      0.005,      0.031,     -0.008,      0.034,     -0.006,      0.034,     -0.024,     -0.022,     -0.001,      0.016,      0.084,      0.016,     -0.008,     -1.407,      0.006,      0.057,     -0.062,     -0.006,      0.043,     -0.007,      0.019,     -0.001,     -0.024,     -0.001,     -0.130,      0.010,      0.027,      0.000,      0.066,      0.980,     -0.029,     -0.035,     -0.018,     -0.008,      0.040,     -0.017,     -0.021,      0.001,     -0.027,      0.002,     -0.004,      0.033,      0.030,     -0.003,     -0.030,     -0.033,     -0.001,     -0.436,     -0.059,      0.011,      0.087,     -0.002,      0.049,     -0.015,     -0.017,      0.060,     -0.029,      0.030,     -0.011,      0.026,      0.019,      0.134,     -0.014,      0.018,     -0.026,      0.039,      0.007,     -0.006,      0.548,     -0.000,      0.010,      0.006,      0.001,     -0.072,      0.020,      0.023,      0.024,      1.467,     -0.023,      0.014,     -0.018,      0.012,     -0.021,      0.012,      0.007,      0.049,      0.020,      0.001,     -0.004,      0.036,      0.011,      0.179,      0.016,     -0.010,      0.001,     -0.032,     -0.027,     -0.013,     -0.028,     -0.815,     -0.073,      0.005,      0.008,     -0.285,     -0.016,     -0.024,     -0.060,     -0.002,      0.015,     -0.028,      0.024,      0.033,      0.004,     -0.017,     -0.008,     -0.021,     -0.116,     -0.012,      0.009,      0.001,      0.019,     -0.002,     -0.002,      0.021,     -0.001,      0.023,     -0.006,      0.612,     -0.683,     -0.030,      0.012,     -0.027,     -0.012,     -0.258,     -0.020,      0.000,      0.008,     -0.329,      0.009,     -0.012,     -0.020,     -0.052,     -0.013,     -0.007,     -0.004,     -0.007,      0.766,      0.521,      0.001,      0.003,     -0.029,     -0.005,     -0.047,     -0.022,     -0.010,     -0.006,     -0.043,     -0.021,     -0.042,     -0.016,     -0.028,      0.029,      0.132,     -0.004,     -0.086,      0.023,     -0.024,      0.009,      0.014,      0.007,     -0.001,     -0.070,     -0.048,      0.028,      0.001,      0.013,      0.016,     -0.002,      0.010,      0.024,     -0.001,      0.008,      0.020,      0.020,     -0.011,      0.022,     -0.018,      0.006,      0.012,     -0.061,     -0.002,     -0.009,      0.008,      0.303,     -0.077,     -0.016,      0.053,      0.030,     -0.051,      0.103,     -0.009,     -0.067,     -0.003,      0.047,     -0.077,     -0.120,     -0.031,      0.027,     -0.077,      0.021,     -0.006,      0.000,      0.037,      0.046,      0.022,      0.032,      0.099,      0.018,     -0.012,     -0.008,      0.040,      0.011,     -0.034,      0.040,     -0.008,      0.020,     -0.024,     -0.015,     -0.027,      0.296,     -0.006,     -0.010,      0.085,      0.035,      0.022,      0.008,     -0.051,      0.027,      0.018,      0.006,      0.049,     -0.036,     -0.021,      0.050,     -0.026,      0.042,     -0.032,      0.027,     -0.007,     -0.036,      0.014,      0.014,      0.034,     -0.001,     -0.011,     -0.037,     -0.030,      0.005,     -0.012,     -0.037,     -0.028,      0.009,      0.063,     -0.025,     -0.024,      0.019,     -0.047,      0.005,     -0.065,     -0.000,      0.023,      0.049,     -0.051,     -0.004,      0.025,      0.000,     -0.009,     -0.046,      0.051,      0.024,      0.026,      0.022,     -0.028,     -0.003,     -0.059,      0.018,      0.007,      0.014,     -0.243,     -0.042,     -0.019,     -0.027,      0.012,      0.004,      0.002,      0.006,      0.014,     -0.085,     -0.021,      0.047,      0.038,     -0.062,      0.670,      0.016,     -0.041,     -0.019,     -0.047,     -0.004,      0.018,      0.016,     -0.012,     -0.015,     -0.007,      0.000,     -0.020,      0.011,     -0.045,     -0.007,     -0.003,     -0.029,     -0.002,     -0.055,      0.045,      0.027,     -0.077,      0.014,      0.055,     -0.278,      0.015,     -0.004,     -0.041,      0.006,     -0.028,     -0.020,      0.028,     -0.069,      0.004,      0.063,     -0.134,     -0.000,      0.081,     -0.137,     -0.001,     -0.033,      0.023,      0.021,      0.026,     -0.020,      0.001,      0.062,     -0.019,      0.077,     -0.051])
+s_std=torch.tensor([0.121, 0.161, 0.057, 0.140, 0.096, 0.074, 0.238, 0.264, 0.138, 0.529, 0.203, 0.288, 0.106, 0.188, 0.090, 0.111, 0.125, 0.089, 0.120, 0.171, 0.236, 0.177, 0.187, 0.363, 0.226, 0.378, 0.349, 0.080, 0.110, 0.095, 0.116, 0.082, 0.122, 0.120, 0.164, 0.093, 0.203, 0.150, 0.105, 0.188, 0.116, 0.550, 0.068, 0.124, 1.485, 0.162, 0.143, 0.227, 0.145, 0.139, 0.111, 0.497, 0.151, 0.130, 0.111, 0.943, 0.072, 0.154, 0.091, 0.361, 0.307, 0.157, 0.088, 0.351, 0.178, 0.130, 0.400, 0.137, 0.233, 0.137, 0.187, 0.106, 0.139, 0.269, 0.155, 0.111, 0.089, 0.166, 0.743, 0.320, 0.321, 0.150, 0.122, 0.133, 0.146, 0.130, 0.123, 0.101, 0.163, 0.133, 0.108, 0.100, 0.529, 0.100, 0.122, 0.299, 0.107, 0.071, 0.063, 0.981, 0.101, 0.195, 0.392, 0.131, 0.249, 0.088, 0.261, 0.145, 2.113, 0.264, 0.119, 0.435, 0.231, 0.067, 0.173, 0.075, 0.137, 0.124, 0.109, 0.249, 0.252, 0.122, 0.736, 0.126, 0.102, 0.130, 0.117, 0.154, 0.141, 0.085, 1.691, 0.071, 0.150, 0.201, 0.751, 0.254, 0.111, 0.522, 0.195, 0.095, 0.411, 0.094, 0.143, 0.132, 0.132, 0.140, 0.132, 0.381, 0.107, 0.102, 0.103, 0.118, 0.075, 0.162, 0.080, 0.101, 0.144, 0.090, 0.838, 9.444, 0.141, 0.087, 0.105, 0.115, 0.670, 0.122, 0.125, 0.115, 0.700, 0.148, 0.120, 0.146, 0.088, 0.160, 0.114, 0.149, 0.123, 1.988, 0.765, 0.094, 0.122, 0.119, 0.079, 0.212, 0.135, 0.329, 0.055, 0.132, 0.105, 0.108, 0.088, 0.171, 0.163, 0.146, 0.082, 0.161, 0.129, 0.130, 0.102, 0.125, 0.097, 0.122, 0.243, 0.214, 0.205, 0.241, 0.153, 0.160, 0.190, 0.138, 0.113, 0.292, 0.110, 0.076, 0.164, 0.095, 0.104, 0.099, 0.149, 0.099, 0.160, 0.163, 0.104, 0.126, 0.453, 0.210, 0.130, 0.130, 0.176, 0.153, 0.523, 0.135, 0.377, 0.089, 0.202, 0.118, 0.129, 0.082, 0.121, 0.389, 0.152, 0.126, 0.143, 0.266, 0.187, 0.086, 0.146, 0.260, 0.096, 0.072, 0.170, 0.117, 0.171, 0.254, 0.110, 0.126, 0.193, 0.081, 0.125, 0.125, 0.642, 0.086, 0.114, 0.422, 0.098, 0.098, 0.093, 0.168, 0.230, 0.117, 0.179, 0.102, 0.102, 0.136, 0.128, 0.100, 0.196, 0.121, 0.129, 0.127, 0.162, 0.139, 0.117, 0.139, 0.136, 0.146, 0.099, 0.119, 0.079, 0.118, 0.166, 0.135, 0.161, 0.165, 0.083, 0.186, 0.245, 0.153, 0.120, 0.130, 0.230, 0.316, 0.323, 0.246, 0.147, 0.080, 0.122, 0.128, 0.115, 0.121, 0.277, 0.125, 0.089, 0.099, 0.135, 0.153, 0.147, 0.102, 0.073, 0.418, 0.117, 0.143, 0.106, 0.089, 0.229, 0.082, 0.131, 0.111, 0.297, 0.128, 0.147, 0.281, 0.386, 0.802, 0.146, 0.161, 0.117, 0.134, 0.459, 0.104, 0.110, 0.176, 0.073, 0.139, 0.223, 0.623, 0.150, 0.137, 0.132, 0.089, 0.175, 0.093, 0.122, 0.134, 0.133, 0.332, 0.107, 0.151, 0.515, 0.187, 0.094, 0.108, 0.082, 0.168, 0.211, 0.129, 0.280, 0.101, 0.156, 0.516, 0.066, 0.250, 0.184, 0.182, 0.188, 0.125, 0.098, 0.111, 0.189, 0.149, 0.218, 0.150, 0.176, 0.104])
+
+
+
+# folder_name='./eval_visualization_RR_24_1loss_256_4_2_vits_metric'
+folder_name='./eval_visualization_RR_24_s_1024_42_bs256_adamW_cos_1e-3_standard'
+# folder_name='./test'
 pyplot_cnt = 0
+
+folder=os.path.exists(folder_name)
+subfolder=os.path.exists(folder_name+'/metric_data_all')
+if not folder:
+	os.makedirs(folder_name)
+if not subfolder:
+	os.makedirs(folder_name+'/metric_data_all')
 
 # set random seed 
 def setup_seed(seed):
@@ -54,19 +133,41 @@ def setup_seed(seed):
 # setup_seed(666)
 
 
+def adjust_learning_rate(optimizer, epoch):
+    """Decay the learning rate with half-cycle cosine after warmup"""
+    if epoch < config.warmup_epochs:
+        lr = config.lr * epoch / config.warmup_epochs 
+    else:
+        lr = config.min_lr + (config.lr - config.min_lr) * 0.5 * \
+            (1. + math.cos(math.pi * (epoch - config.warmup_epochs) / (config.epochs - config.warmup_epochs)))
+    for param_group in optimizer.param_groups:
+        if "lr_scale" in param_group:
+            param_group["lr"] = lr * param_group["lr_scale"]
+        else:
+            param_group["lr"] = lr
+    return lr
+
+
 
 class Model(nn.Module):
 	def __init__(self, name='naive', num_channels=768, transform=None):
 		super(Model, self).__init__()
 		self.name = name
-		self.encoder = RepresentationNetwork(config.ss_observation_shape,
-		                                     num_blocks=5,
-		                                     num_channels=num_channels,
-		                                     downsample=True,
-		                                     momentum=config.bn_momentum)
-		self.decoder = Decoder()
-		self.model_mae= prepare_model(chkpt_dir='./mae_visualize_vit_base.pth', arch='mae_vit_base_patch16',device=config.device)
-		# self.model_mae= prepare_model(chkpt_dir='./checkpoint-399.pth', arch='mae_vit_small_patch16',device=config.device)
+		# self.encoder = RepresentationNetwork(config.ss_observation_shape,
+		#                                      num_blocks=5,
+		#                                      num_channels=num_channels,
+		#                                      downsample=True,
+		#                                      momentum=config.bn_momentum)
+		# self.decoder = Decoder()
+		# self.loss_fn_vgg = lpips.LPIPS(net='vgg')
+		# self.r3m = load_r3m("resnet50") # resnet18, resnet34
+		# self.r3m.eval()
+		# self.r3m.to(config.device)
+		# print(self.r3m.module.device)
+		# print(self.r3m.device_ids)
+		# quit()
+		# self.model_mae= prepare_model(chkpt_dir='./mae_visualize_vit_base.pth', arch='mae_vit_base_patch16',device=config.device)
+		self.model_mae= prepare_model(chkpt_dir='./checkpoint-1599.pth', arch='mae_vit_small_patch16',device=config.device)
 		self.latent_dim=config.latent_dim
 		self.latent_num=24
 		self.model_mae.requires_grad_(False)
@@ -78,14 +179,14 @@ class Model(nn.Module):
 		                           config.latent_action_channel,
 		                           num_blocks=5)
 		self.dynamic = Dynamic(num_channels, config.latent_action_channel, num_blocks=5)
-		self.projector = Projector(num_channels, 10)
+		# self.projector = Projector(num_channels, 10)
 		# self.predictor = Predictor()
 		
 		self.num_channels = num_channels
 		self.transform = transform
 		
-		self.optim = optim.Optimizer(self.parameters(), {})
-		self.loss = nn.CosineSimilarity()
+		# self.optim = optim.Optimizer(self.parameters(), {})
+		# self.loss = nn.CosineSimilarity()
 		
 		# Atari
 		self.proj_hid = 1024
@@ -100,23 +201,23 @@ class Model(nn.Module):
 		# self.pred_out = 256
 		
 		# TODO bias and affine ?
-		self.projection_in_dim = num_channels * config.state_size
-		self.projection = nn.Sequential(
-			nn.Linear(self.projection_in_dim, self.proj_hid, bias=False),
-			nn.BatchNorm1d(self.proj_hid),
-			nn.ReLU(),
-			nn.Linear(self.proj_hid, self.proj_hid, bias=False),
-			nn.BatchNorm1d(self.proj_hid),
-			nn.ReLU(),
-			nn.Linear(self.proj_hid, self.proj_out),
-			nn.BatchNorm1d(self.proj_out, affine=False)
-		)
-		self.projection_head = nn.Sequential(
-			nn.Linear(self.proj_out, self.pred_hid, bias=False),
-			nn.BatchNorm1d(self.pred_hid),
-			nn.ReLU(),
-			nn.Linear(self.pred_hid, self.pred_out),
-		)
+		# self.projection_in_dim = num_channels * config.state_size
+		# self.projection = nn.Sequential(
+		# 	nn.Linear(self.projection_in_dim, self.proj_hid, bias=False),
+		# 	nn.BatchNorm1d(self.proj_hid),
+		# 	nn.ReLU(),
+		# 	nn.Linear(self.proj_hid, self.proj_hid, bias=False),
+		# 	nn.BatchNorm1d(self.proj_hid),
+		# 	nn.ReLU(),
+		# 	nn.Linear(self.proj_hid, self.proj_out),
+		# 	nn.BatchNorm1d(self.proj_out, affine=False)
+		# )
+		# self.projection_head = nn.Sequential(
+		# 	nn.Linear(self.proj_out, self.pred_hid, bias=False),
+		# 	nn.BatchNorm1d(self.pred_hid),
+		# 	nn.ReLU(),
+		# 	nn.Linear(self.pred_hid, self.pred_out),
+		# )
 		self.pos_embed_set = nn.Parameter(torch.zeros(1, 4*196 + 1, self.latent_dim), requires_grad=False)  # fixed sin-cos embedding
 		self.produced_latent = nn.Parameter(torch.zeros(config.batch_size, 197, self.latent_dim))
 		self.latent_diff = nn.Parameter(torch.zeros(config.batch_size, self.latent_num, self.latent_dim))
@@ -344,7 +445,35 @@ class Model(nn.Module):
 		x=self.model_mae.forward_decoder(x,ids_restore)
 		return x
 
-	def visualize(self,obs0,_obs0,obs1,_obs1,s1, _s1,cnt=0):
+	def visualize(self,obs0,_obs0,obs1,_obs1,obs1_blur,s1, _s1,cnt=0):
+		# obs1=obs1_blur
+		# _obs0_cal=obs0[:, -3:][0].unsqueeze(0).to(torch.float32)
+		# __obs0_cal=_obs0[:, -3:][0].unsqueeze(0).to(torch.float32)
+		# _obs1_cal=obs1[:, -3:][0].unsqueeze(0).to(torch.float32)
+		# __obs1_cal=_obs1[:, -3:][0].unsqueeze(0).to(torch.float32)
+		# d_0=self.loss_fn_alex(_obs1_cal,__obs0_cal).item()
+		# d_1=self.loss_fn_alex(_obs1_cal,__obs1_cal).item()
+		# d_0=round(d_0,3)
+		# d_1=round(d_1,3)
+		# print(_obs0_cal.device)
+		# print(_obs0_cal.shape)
+
+		# # r3m
+		# with torch.no_grad():
+		# 	embedding_obs0 = self.r3m(_obs0_cal * 255.0) ## R3M expects image input to be [0-255]
+		# 	embedding_recon0 = self.r3m(__obs0_cal * 255.0)
+		# 	embedding_obs1 = self.r3m(_obs1_cal * 255.0)
+		# 	embedding_recon1 = self.r3m(__obs1_cal * 255.0)
+		# # print(embedding.shape) # [1, 2048]
+		# d_0_cos=cosine_similarity(embedding_obs1,embedding_recon0).item()
+		# d_1_cos=cosine_similarity(embedding_obs1,embedding_recon1).item()
+		# d_0_cos=round(d_0_cos,3)
+		# d_1_cos=round(d_1_cos,3)
+
+
+		# print(d_0,d_1)
+		# print(_obs0_cal.shape,__obs0_cal.shape,_obs1_cal.shape,__obs1_cal.shape)
+		# quit()
 		# s0,mask0,ids_restore0=self.mae_encoder_forward(obs0)
 		# _obs0=self.mae_decoder_forward(s0,ids_restore0)
 		# _obs0=self.model_mae.unpatchify(_obs0)
@@ -358,11 +487,11 @@ class Model(nn.Module):
 		plt.subplot(1, 5, 1)
 		show_image(obs0_[0], "obs_0")
 		plt.subplot(1, 5, 2)
-		show_image(_obs0_[0], "recon_0")
+		show_image(_obs0_[0], "PL:"+str('d_0')+"\nemb:"+str('d_0_cos'))
 		plt.subplot(1, 5, 3)
 		show_image(obs1_[0], "obs_1")
 		plt.subplot(1, 5, 4)
-		show_image(_obs1_[0], "recon_1")
+		show_image(_obs1_[0], "PL:"+str('d_1')+"\nemb:"+str('d_1_cos'))
 		plt.subplot(1,5,5)
 		show_latent_diff(latent_mse=latent_mse, title="s_mse")
 		plt.show()
@@ -371,7 +500,76 @@ class Model(nn.Module):
 		plt.close()
 
 
-	def forward(self,obs0,obs1):
+
+	def save_fig(self,obs0,_obs0,obs1,_obs1,obs1_blur,cnt=0):
+
+		for i in range(config.batch_size):
+		# if _obs0.device=='cuda:0':
+			deviceid_r0=str(_obs0.device)
+			_obs0_ = torch.einsum('nchw->nhwc', _obs0).detach().cpu()
+			img_recon0=save_preprocess(_obs0_[i])
+			plt.imsave(folder_name+'/metric_data_all/recon0_'+str(i)+'_'+str(cnt)+deviceid_r0+'.png',img_recon0)
+			plt.close()
+		# if obs0.device=='cuda:0':
+			devicei_o0=str(obs0.device)
+			obs0_ = torch.einsum('nchw->nhwc', obs0).detach().cpu()
+			img_obs0=save_preprocess(obs0_[i])
+			plt.imsave(folder_name+'/metric_data_all/obs0_'+str(i)+'_'+str(cnt)+devicei_o0+'.png',img_obs0)
+			plt.close()
+		# if _obs1.device=='cuda:0':
+			devicei_r1=str(obs0.device)
+			_obs1_ = torch.einsum('nchw->nhwc', _obs1).detach().cpu()
+			img_recon1=save_preprocess(_obs1_[i])
+			plt.imsave(folder_name+'/metric_data_all/recon1_'+str(i)+'_'+str(cnt)+devicei_r1+'.png',img_recon1)
+			plt.close()
+		# if obs1.device=='cuda:0':
+			devicei_10=str(obs0.device)
+			obs1_ = torch.einsum('nchw->nhwc', obs1).detach().cpu()
+			img_obs1=save_preprocess(obs1_[i])
+			plt.imsave(folder_name+'/metric_data_all/obs1_'+str(i)+'_'+str(cnt)+devicei_10+'.png',img_obs1)
+			plt.close()
+		# if obs1_blur.device=='cuda:0':
+			devicei_b=str(obs0.device)
+			obs1_blur_=torch.einsum('nchw->nhwc', obs1_blur).detach().cpu()
+			img_obs1_blur=save_preprocess(obs1_blur_[i])
+			plt.imsave(folder_name+'/metric_data_all/obs1_blur_'+str(i)+'_'+str(cnt)+devicei_b+'.png',img_obs1_blur)
+			plt.close()
+			# img_obs0=save_preprocess(obs0_[0])
+			# img_recon0=save_preprocess(_obs0_[0])
+			# img_obs1=save_preprocess(obs1_[0])
+			# img_recon1=save_preprocess(_obs1_[0])
+			# img_obs1_blur=save_preprocess(obs1_blur[0])
+			# # plt.imshow(obs0_[0])
+			# # print(obs0_[0].shape)
+			# # quit()
+			# plt.imsave('./metric_data/obs0_'+str(cnt)+'.png',img_obs0)
+			# # plt.imshow(_obs0_[0])
+			# plt.imsave('./metric_data/recon0_'+str(cnt)+'.png',img_recon0)
+			# # plt.imshow(obs1_[0])
+			# plt.imsave('./metric_data/obs1_'+str(cnt)+'.png',img_obs1)
+			# # plt.imshow(_obs1_[0])
+			# plt.imsave('./metric_data/recon1_'+str(cnt)+'.png',img_recon1)
+			# # plt.imshow(obs1_blur[0])
+			# plt.imsave('./metric_data/obs1_blur_'+str(cnt)+'.png',img_obs1_blur)
+			plt.close()
+			# plt.subplot(1, 5, 1)
+			# show_image(obs0_[0], "obs_0")
+			# plt.subplot(1, 5, 2)
+			# show_image(_obs0_[0], ":"+str(d_0))
+			# plt.subplot(1, 5, 3)
+			# show_image(obs1_[0], "obs_1")
+			# plt.subplot(1, 5, 4)
+			# show_image(_obs1_[0], ":"+str(d_1))
+			# plt.subplot(1,5,5)
+			# show_latent_diff(latent_mse=latent_mse, title="s_mse")
+			# plt.show()
+			# plt.savefig('./metric_fig/'+str(cnt)+'.png')
+			# # plt.savefig('./eval_visualization_48_42/test_4_42_'+str(cnt)+'.png')
+			# plt.close()
+		
+
+
+	def forward(self,obs0,obs1,s_mean,s_std):
 
 		# auto encoder loss
 		s0,mask0,ids_restore0=self.mae_encoder_forward(obs0)
@@ -383,6 +581,9 @@ class Model(nn.Module):
 		# if single frame
 		_obs0=self.mae_decoder_forward(s0,ids_restore0)
 		_obs0=self.model_mae.unpatchify(_obs0)
+		# trick blur obs_1
+		obs1_blur=self.mae_decoder_forward(s1,ids_restore1)
+		obs1_blur=self.model_mae.unpatchify(obs1_blur)
 
 
 		# s0 = self.encoder(obs0)
@@ -398,12 +599,28 @@ class Model(nn.Module):
 			if config.state_detach:
 				s0 = s0.detach()
 				s1 = s1.detach()
+
+			# normalize s0 and s1
+			s0_dummy=s0
+			# s_mean=s_mean.to(config.device)
+			# s_std=s_std.to(config.device)
+			# s0=(s0-s_mean)/s_std
+			# s1=(s1-s_mean)/s_std
+			# print('mean and std:',s0.std())
+			# quit()
 			
 			z, loss_lag, perp = self.lag(s0, s1, self.pos_embed_set, self.latent_diff)
 			_s1 = self.dynamic(s0, z, self.pos_embed_set,self.produced_latent)
 			s1_out=_s1
 			# s1_out = self.dynamic(s0, z, self.pos_embed_set,self.produced_latent)
+			# s1_out=s1_out*diff_std+diff_mean
+			# s0=s0*s0_std+s0_mean
+			# s1=s1*s1_std+s1_mean
 			# _s1=s1_out+s0
+			# _s1=_s1*s_std+s_mean
+			# s0=s0*s_std+s_mean
+			# s1=s1*s_std+s_mean
+
 
 
 			# # if 4 frames stack
@@ -412,7 +629,7 @@ class Model(nn.Module):
 			# if single frame
 			_obs1=self.mae_decoder_forward(_s1,ids_restore1)
 			_obs1=self.model_mae.unpatchify(_obs1)			
-		return obs0, obs1, _obs0, _obs1, s0, s1_out, s1, _s1, loss_lag
+		return obs0, obs1, _obs0, _obs1,obs1_blur, s0, s1_out, s1, _s1, loss_lag
 
 	def calculate_loss(self, obs0, obs1, _obs0, _obs1, s0, s1_out, s1, _s1, loss_lag):
 		# representation loss
@@ -433,7 +650,12 @@ class Model(nn.Module):
 		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=1)).sqrt().mean()
 		# loss_dyna = (((s1 - _s1) ** 2).sum(dim=(1,2))).sqrt().mean()
 
+		# s0=s0*s_std+s_mean
+		# s1=s1*s_std+s_mean
 		# s_diff=s1-s0
+		# s_diff=(s_diff-diff_mean)/diff_std
+		# print('mean and std:',s_diff.mean())
+		# quit()
 		# loss_dyna = F.mse_loss(s1_out,s_diff)
 		loss_dyna = F.mse_loss(s1,_s1)
 
@@ -525,7 +747,7 @@ def training_curve(epoch_loss,mode):
 		plt.close()
 
 
-def evaluation(model,eval_dataset,eval_sampler):
+def evaluation(model,eval_dataset,eval_sampler,iter,epoch):
 	cnt=0
 	model.eval()
 	eval_loss_sum=0
@@ -548,23 +770,41 @@ def evaluation(model,eval_dataset,eval_sampler):
 		obs1=obs1/imagenet_std
 		obs0 = torch.einsum('nhwc->nchw', obs0)
 		obs1 = torch.einsum('nhwc->nchw', obs1)
+		
+		s_mean=torch.tensor([     0.020,      0.031,     -0.014,     -0.119,      0.012,      0.023,     -0.040,     -0.046,     -0.046,     -0.085,      0.041,      0.064,      0.020,      0.019,      0.021,     -0.029,      0.011,      0.005,     -0.004,      0.067,      0.033,      0.003,     -0.038,     -0.029,     -0.023,     -0.022,      0.049,     -0.018,     -0.025,      0.016,     -0.008,      0.005,      0.031,     -0.008,      0.034,     -0.006,      0.034,     -0.024,     -0.022,     -0.001,      0.016,      0.084,      0.016,     -0.008,     -1.407,      0.006,      0.057,     -0.062,     -0.006,      0.043,     -0.007,      0.019,     -0.001,     -0.024,     -0.001,     -0.130,      0.010,      0.027,      0.000,      0.066,      0.980,     -0.029,     -0.035,     -0.018,     -0.008,      0.040,     -0.017,     -0.021,      0.001,     -0.027,      0.002,     -0.004,      0.033,      0.030,     -0.003,     -0.030,     -0.033,     -0.001,     -0.436,     -0.059,      0.011,      0.087,     -0.002,      0.049,     -0.015,     -0.017,      0.060,     -0.029,      0.030,     -0.011,      0.026,      0.019,      0.134,     -0.014,      0.018,     -0.026,      0.039,      0.007,     -0.006,      0.548,     -0.000,      0.010,      0.006,      0.001,     -0.072,      0.020,      0.023,      0.024,      1.467,     -0.023,      0.014,     -0.018,      0.012,     -0.021,      0.012,      0.007,      0.049,      0.020,      0.001,     -0.004,      0.036,      0.011,      0.179,      0.016,     -0.010,      0.001,     -0.032,     -0.027,     -0.013,     -0.028,     -0.815,     -0.073,      0.005,      0.008,     -0.285,     -0.016,     -0.024,     -0.060,     -0.002,      0.015,     -0.028,      0.024,      0.033,      0.004,     -0.017,     -0.008,     -0.021,     -0.116,     -0.012,      0.009,      0.001,      0.019,     -0.002,     -0.002,      0.021,     -0.001,      0.023,     -0.006,      0.612,     -0.683,     -0.030,      0.012,     -0.027,     -0.012,     -0.258,     -0.020,      0.000,      0.008,     -0.329,      0.009,     -0.012,     -0.020,     -0.052,     -0.013,     -0.007,     -0.004,     -0.007,      0.766,      0.521,      0.001,      0.003,     -0.029,     -0.005,     -0.047,     -0.022,     -0.010,     -0.006,     -0.043,     -0.021,     -0.042,     -0.016,     -0.028,      0.029,      0.132,     -0.004,     -0.086,      0.023,     -0.024,      0.009,      0.014,      0.007,     -0.001,     -0.070,     -0.048,      0.028,      0.001,      0.013,      0.016,     -0.002,      0.010,      0.024,     -0.001,      0.008,      0.020,      0.020,     -0.011,      0.022,     -0.018,      0.006,      0.012,     -0.061,     -0.002,     -0.009,      0.008,      0.303,     -0.077,     -0.016,      0.053,      0.030,     -0.051,      0.103,     -0.009,     -0.067,     -0.003,      0.047,     -0.077,     -0.120,     -0.031,      0.027,     -0.077,      0.021,     -0.006,      0.000,      0.037,      0.046,      0.022,      0.032,      0.099,      0.018,     -0.012,     -0.008,      0.040,      0.011,     -0.034,      0.040,     -0.008,      0.020,     -0.024,     -0.015,     -0.027,      0.296,     -0.006,     -0.010,      0.085,      0.035,      0.022,      0.008,     -0.051,      0.027,      0.018,      0.006,      0.049,     -0.036,     -0.021,      0.050,     -0.026,      0.042,     -0.032,      0.027,     -0.007,     -0.036,      0.014,      0.014,      0.034,     -0.001,     -0.011,     -0.037,     -0.030,      0.005,     -0.012,     -0.037,     -0.028,      0.009,      0.063,     -0.025,     -0.024,      0.019,     -0.047,      0.005,     -0.065,     -0.000,      0.023,      0.049,     -0.051,     -0.004,      0.025,      0.000,     -0.009,     -0.046,      0.051,      0.024,      0.026,      0.022,     -0.028,     -0.003,     -0.059,      0.018,      0.007,      0.014,     -0.243,     -0.042,     -0.019,     -0.027,      0.012,      0.004,      0.002,      0.006,      0.014,     -0.085,     -0.021,      0.047,      0.038,     -0.062,      0.670,      0.016,     -0.041,     -0.019,     -0.047,     -0.004,      0.018,      0.016,     -0.012,     -0.015,     -0.007,      0.000,     -0.020,      0.011,     -0.045,     -0.007,     -0.003,     -0.029,     -0.002,     -0.055,      0.045,      0.027,     -0.077,      0.014,      0.055,     -0.278,      0.015,     -0.004,     -0.041,      0.006,     -0.028,     -0.020,      0.028,     -0.069,      0.004,      0.063,     -0.134,     -0.000,      0.081,     -0.137,     -0.001,     -0.033,      0.023,      0.021,      0.026,     -0.020,      0.001,      0.062,     -0.019,      0.077,     -0.051])
+		s_std=torch.tensor([0.121, 0.161, 0.057, 0.140, 0.096, 0.074, 0.238, 0.264, 0.138, 0.529, 0.203, 0.288, 0.106, 0.188, 0.090, 0.111, 0.125, 0.089, 0.120, 0.171, 0.236, 0.177, 0.187, 0.363, 0.226, 0.378, 0.349, 0.080, 0.110, 0.095, 0.116, 0.082, 0.122, 0.120, 0.164, 0.093, 0.203, 0.150, 0.105, 0.188, 0.116, 0.550, 0.068, 0.124, 1.485, 0.162, 0.143, 0.227, 0.145, 0.139, 0.111, 0.497, 0.151, 0.130, 0.111, 0.943, 0.072, 0.154, 0.091, 0.361, 0.307, 0.157, 0.088, 0.351, 0.178, 0.130, 0.400, 0.137, 0.233, 0.137, 0.187, 0.106, 0.139, 0.269, 0.155, 0.111, 0.089, 0.166, 0.743, 0.320, 0.321, 0.150, 0.122, 0.133, 0.146, 0.130, 0.123, 0.101, 0.163, 0.133, 0.108, 0.100, 0.529, 0.100, 0.122, 0.299, 0.107, 0.071, 0.063, 0.981, 0.101, 0.195, 0.392, 0.131, 0.249, 0.088, 0.261, 0.145, 2.113, 0.264, 0.119, 0.435, 0.231, 0.067, 0.173, 0.075, 0.137, 0.124, 0.109, 0.249, 0.252, 0.122, 0.736, 0.126, 0.102, 0.130, 0.117, 0.154, 0.141, 0.085, 1.691, 0.071, 0.150, 0.201, 0.751, 0.254, 0.111, 0.522, 0.195, 0.095, 0.411, 0.094, 0.143, 0.132, 0.132, 0.140, 0.132, 0.381, 0.107, 0.102, 0.103, 0.118, 0.075, 0.162, 0.080, 0.101, 0.144, 0.090, 0.838, 9.444, 0.141, 0.087, 0.105, 0.115, 0.670, 0.122, 0.125, 0.115, 0.700, 0.148, 0.120, 0.146, 0.088, 0.160, 0.114, 0.149, 0.123, 1.988, 0.765, 0.094, 0.122, 0.119, 0.079, 0.212, 0.135, 0.329, 0.055, 0.132, 0.105, 0.108, 0.088, 0.171, 0.163, 0.146, 0.082, 0.161, 0.129, 0.130, 0.102, 0.125, 0.097, 0.122, 0.243, 0.214, 0.205, 0.241, 0.153, 0.160, 0.190, 0.138, 0.113, 0.292, 0.110, 0.076, 0.164, 0.095, 0.104, 0.099, 0.149, 0.099, 0.160, 0.163, 0.104, 0.126, 0.453, 0.210, 0.130, 0.130, 0.176, 0.153, 0.523, 0.135, 0.377, 0.089, 0.202, 0.118, 0.129, 0.082, 0.121, 0.389, 0.152, 0.126, 0.143, 0.266, 0.187, 0.086, 0.146, 0.260, 0.096, 0.072, 0.170, 0.117, 0.171, 0.254, 0.110, 0.126, 0.193, 0.081, 0.125, 0.125, 0.642, 0.086, 0.114, 0.422, 0.098, 0.098, 0.093, 0.168, 0.230, 0.117, 0.179, 0.102, 0.102, 0.136, 0.128, 0.100, 0.196, 0.121, 0.129, 0.127, 0.162, 0.139, 0.117, 0.139, 0.136, 0.146, 0.099, 0.119, 0.079, 0.118, 0.166, 0.135, 0.161, 0.165, 0.083, 0.186, 0.245, 0.153, 0.120, 0.130, 0.230, 0.316, 0.323, 0.246, 0.147, 0.080, 0.122, 0.128, 0.115, 0.121, 0.277, 0.125, 0.089, 0.099, 0.135, 0.153, 0.147, 0.102, 0.073, 0.418, 0.117, 0.143, 0.106, 0.089, 0.229, 0.082, 0.131, 0.111, 0.297, 0.128, 0.147, 0.281, 0.386, 0.802, 0.146, 0.161, 0.117, 0.134, 0.459, 0.104, 0.110, 0.176, 0.073, 0.139, 0.223, 0.623, 0.150, 0.137, 0.132, 0.089, 0.175, 0.093, 0.122, 0.134, 0.133, 0.332, 0.107, 0.151, 0.515, 0.187, 0.094, 0.108, 0.082, 0.168, 0.211, 0.129, 0.280, 0.101, 0.156, 0.516, 0.066, 0.250, 0.184, 0.182, 0.188, 0.125, 0.098, 0.111, 0.189, 0.149, 0.218, 0.150, 0.176, 0.104])
+		s_mean=s_mean.to(config.device)
+		s_std=s_std.to(config.device)
 		with torch.no_grad():
-			obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1)
+			obs0, obs1, _obs0, _obs1,obs1_blur,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1,s_mean,s_std)
 			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag)
 		eval_loss_sum+=loss.mean().item()
 		if cnt%3==1:
-			model.module.visualize(obs0,_obs0,obs1,_obs1,s1, _s1,cnt)
+			model.module.visualize(obs0,_obs0,obs1,_obs1,obs1_blur,s1, _s1,cnt)
+		if epoch%10==9:
+			model.module.save_fig(obs0,_obs0,obs1,_obs1,obs1_blur,cnt)
 	return eval_loss_sum/cnt
 
 
 
 def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
+	# lr_scheduler, _ = create_scheduler(args, optimizer)
 	loss_curve=[]
 	eval_loss_curve=[]
 	cnt = 0
-	for i in range(50):
+	# s0_list=0
+	# s1_list=0
+	# diff_list=[]
+	# s0_std_list=0
+	# s1_std_list=0
+	# diff_std_list=[]
+	for epoch in range(config.epochs):
+		data_iter_step=0
 		data_loader = get_data_loader(dataset,sampler)
 		for data in data_loader:
+			# we use a per iteration (instead of per epoch) lr scheduler
+			if data_iter_step % 1 == 0:
+				adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch)
 			model.train()
 			print(cnt)
 			# print(data.shape)
@@ -587,6 +827,11 @@ def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
 			obs1=obs1/imagenet_std
 			obs0 = torch.einsum('nhwc->nchw', obs0)
 			obs1 = torch.einsum('nhwc->nchw', obs1)
+			
+			s_mean=torch.tensor([     0.020,      0.031,     -0.014,     -0.119,      0.012,      0.023,     -0.040,     -0.046,     -0.046,     -0.085,      0.041,      0.064,      0.020,      0.019,      0.021,     -0.029,      0.011,      0.005,     -0.004,      0.067,      0.033,      0.003,     -0.038,     -0.029,     -0.023,     -0.022,      0.049,     -0.018,     -0.025,      0.016,     -0.008,      0.005,      0.031,     -0.008,      0.034,     -0.006,      0.034,     -0.024,     -0.022,     -0.001,      0.016,      0.084,      0.016,     -0.008,     -1.407,      0.006,      0.057,     -0.062,     -0.006,      0.043,     -0.007,      0.019,     -0.001,     -0.024,     -0.001,     -0.130,      0.010,      0.027,      0.000,      0.066,      0.980,     -0.029,     -0.035,     -0.018,     -0.008,      0.040,     -0.017,     -0.021,      0.001,     -0.027,      0.002,     -0.004,      0.033,      0.030,     -0.003,     -0.030,     -0.033,     -0.001,     -0.436,     -0.059,      0.011,      0.087,     -0.002,      0.049,     -0.015,     -0.017,      0.060,     -0.029,      0.030,     -0.011,      0.026,      0.019,      0.134,     -0.014,      0.018,     -0.026,      0.039,      0.007,     -0.006,      0.548,     -0.000,      0.010,      0.006,      0.001,     -0.072,      0.020,      0.023,      0.024,      1.467,     -0.023,      0.014,     -0.018,      0.012,     -0.021,      0.012,      0.007,      0.049,      0.020,      0.001,     -0.004,      0.036,      0.011,      0.179,      0.016,     -0.010,      0.001,     -0.032,     -0.027,     -0.013,     -0.028,     -0.815,     -0.073,      0.005,      0.008,     -0.285,     -0.016,     -0.024,     -0.060,     -0.002,      0.015,     -0.028,      0.024,      0.033,      0.004,     -0.017,     -0.008,     -0.021,     -0.116,     -0.012,      0.009,      0.001,      0.019,     -0.002,     -0.002,      0.021,     -0.001,      0.023,     -0.006,      0.612,     -0.683,     -0.030,      0.012,     -0.027,     -0.012,     -0.258,     -0.020,      0.000,      0.008,     -0.329,      0.009,     -0.012,     -0.020,     -0.052,     -0.013,     -0.007,     -0.004,     -0.007,      0.766,      0.521,      0.001,      0.003,     -0.029,     -0.005,     -0.047,     -0.022,     -0.010,     -0.006,     -0.043,     -0.021,     -0.042,     -0.016,     -0.028,      0.029,      0.132,     -0.004,     -0.086,      0.023,     -0.024,      0.009,      0.014,      0.007,     -0.001,     -0.070,     -0.048,      0.028,      0.001,      0.013,      0.016,     -0.002,      0.010,      0.024,     -0.001,      0.008,      0.020,      0.020,     -0.011,      0.022,     -0.018,      0.006,      0.012,     -0.061,     -0.002,     -0.009,      0.008,      0.303,     -0.077,     -0.016,      0.053,      0.030,     -0.051,      0.103,     -0.009,     -0.067,     -0.003,      0.047,     -0.077,     -0.120,     -0.031,      0.027,     -0.077,      0.021,     -0.006,      0.000,      0.037,      0.046,      0.022,      0.032,      0.099,      0.018,     -0.012,     -0.008,      0.040,      0.011,     -0.034,      0.040,     -0.008,      0.020,     -0.024,     -0.015,     -0.027,      0.296,     -0.006,     -0.010,      0.085,      0.035,      0.022,      0.008,     -0.051,      0.027,      0.018,      0.006,      0.049,     -0.036,     -0.021,      0.050,     -0.026,      0.042,     -0.032,      0.027,     -0.007,     -0.036,      0.014,      0.014,      0.034,     -0.001,     -0.011,     -0.037,     -0.030,      0.005,     -0.012,     -0.037,     -0.028,      0.009,      0.063,     -0.025,     -0.024,      0.019,     -0.047,      0.005,     -0.065,     -0.000,      0.023,      0.049,     -0.051,     -0.004,      0.025,      0.000,     -0.009,     -0.046,      0.051,      0.024,      0.026,      0.022,     -0.028,     -0.003,     -0.059,      0.018,      0.007,      0.014,     -0.243,     -0.042,     -0.019,     -0.027,      0.012,      0.004,      0.002,      0.006,      0.014,     -0.085,     -0.021,      0.047,      0.038,     -0.062,      0.670,      0.016,     -0.041,     -0.019,     -0.047,     -0.004,      0.018,      0.016,     -0.012,     -0.015,     -0.007,      0.000,     -0.020,      0.011,     -0.045,     -0.007,     -0.003,     -0.029,     -0.002,     -0.055,      0.045,      0.027,     -0.077,      0.014,      0.055,     -0.278,      0.015,     -0.004,     -0.041,      0.006,     -0.028,     -0.020,      0.028,     -0.069,      0.004,      0.063,     -0.134,     -0.000,      0.081,     -0.137,     -0.001,     -0.033,      0.023,      0.021,      0.026,     -0.020,      0.001,      0.062,     -0.019,      0.077,     -0.051])
+			s_std=torch.tensor([0.121, 0.161, 0.057, 0.140, 0.096, 0.074, 0.238, 0.264, 0.138, 0.529, 0.203, 0.288, 0.106, 0.188, 0.090, 0.111, 0.125, 0.089, 0.120, 0.171, 0.236, 0.177, 0.187, 0.363, 0.226, 0.378, 0.349, 0.080, 0.110, 0.095, 0.116, 0.082, 0.122, 0.120, 0.164, 0.093, 0.203, 0.150, 0.105, 0.188, 0.116, 0.550, 0.068, 0.124, 1.485, 0.162, 0.143, 0.227, 0.145, 0.139, 0.111, 0.497, 0.151, 0.130, 0.111, 0.943, 0.072, 0.154, 0.091, 0.361, 0.307, 0.157, 0.088, 0.351, 0.178, 0.130, 0.400, 0.137, 0.233, 0.137, 0.187, 0.106, 0.139, 0.269, 0.155, 0.111, 0.089, 0.166, 0.743, 0.320, 0.321, 0.150, 0.122, 0.133, 0.146, 0.130, 0.123, 0.101, 0.163, 0.133, 0.108, 0.100, 0.529, 0.100, 0.122, 0.299, 0.107, 0.071, 0.063, 0.981, 0.101, 0.195, 0.392, 0.131, 0.249, 0.088, 0.261, 0.145, 2.113, 0.264, 0.119, 0.435, 0.231, 0.067, 0.173, 0.075, 0.137, 0.124, 0.109, 0.249, 0.252, 0.122, 0.736, 0.126, 0.102, 0.130, 0.117, 0.154, 0.141, 0.085, 1.691, 0.071, 0.150, 0.201, 0.751, 0.254, 0.111, 0.522, 0.195, 0.095, 0.411, 0.094, 0.143, 0.132, 0.132, 0.140, 0.132, 0.381, 0.107, 0.102, 0.103, 0.118, 0.075, 0.162, 0.080, 0.101, 0.144, 0.090, 0.838, 9.444, 0.141, 0.087, 0.105, 0.115, 0.670, 0.122, 0.125, 0.115, 0.700, 0.148, 0.120, 0.146, 0.088, 0.160, 0.114, 0.149, 0.123, 1.988, 0.765, 0.094, 0.122, 0.119, 0.079, 0.212, 0.135, 0.329, 0.055, 0.132, 0.105, 0.108, 0.088, 0.171, 0.163, 0.146, 0.082, 0.161, 0.129, 0.130, 0.102, 0.125, 0.097, 0.122, 0.243, 0.214, 0.205, 0.241, 0.153, 0.160, 0.190, 0.138, 0.113, 0.292, 0.110, 0.076, 0.164, 0.095, 0.104, 0.099, 0.149, 0.099, 0.160, 0.163, 0.104, 0.126, 0.453, 0.210, 0.130, 0.130, 0.176, 0.153, 0.523, 0.135, 0.377, 0.089, 0.202, 0.118, 0.129, 0.082, 0.121, 0.389, 0.152, 0.126, 0.143, 0.266, 0.187, 0.086, 0.146, 0.260, 0.096, 0.072, 0.170, 0.117, 0.171, 0.254, 0.110, 0.126, 0.193, 0.081, 0.125, 0.125, 0.642, 0.086, 0.114, 0.422, 0.098, 0.098, 0.093, 0.168, 0.230, 0.117, 0.179, 0.102, 0.102, 0.136, 0.128, 0.100, 0.196, 0.121, 0.129, 0.127, 0.162, 0.139, 0.117, 0.139, 0.136, 0.146, 0.099, 0.119, 0.079, 0.118, 0.166, 0.135, 0.161, 0.165, 0.083, 0.186, 0.245, 0.153, 0.120, 0.130, 0.230, 0.316, 0.323, 0.246, 0.147, 0.080, 0.122, 0.128, 0.115, 0.121, 0.277, 0.125, 0.089, 0.099, 0.135, 0.153, 0.147, 0.102, 0.073, 0.418, 0.117, 0.143, 0.106, 0.089, 0.229, 0.082, 0.131, 0.111, 0.297, 0.128, 0.147, 0.281, 0.386, 0.802, 0.146, 0.161, 0.117, 0.134, 0.459, 0.104, 0.110, 0.176, 0.073, 0.139, 0.223, 0.623, 0.150, 0.137, 0.132, 0.089, 0.175, 0.093, 0.122, 0.134, 0.133, 0.332, 0.107, 0.151, 0.515, 0.187, 0.094, 0.108, 0.082, 0.168, 0.211, 0.129, 0.280, 0.101, 0.156, 0.516, 0.066, 0.250, 0.184, 0.182, 0.188, 0.125, 0.098, 0.111, 0.189, 0.149, 0.218, 0.150, 0.176, 0.104])
+			s_mean=s_mean.to(config.device)
+			s_std=s_std.to(config.device)
 
 			
 			# model. optim.zero_grad()
@@ -596,7 +841,23 @@ def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
 
 			# loss = model.learn(obs0, obs1, visual=(cnt % 50 == 0))
 			# print('#', loss)
-			obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1)
+			obs0, obs1, _obs0, _obs1,obs1_blur,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1,s_mean,s_std)
+			# normalize 
+			# s0_mean=s0.mean(dim=(0,1))
+			# s0_list+=s0_mean
+			# # print(s0_list.shape)
+			# s0_std=s0.std(dim=(1))
+			# s0_std=s0_std.mean(dim=0)
+			# s0_std_list+=s0_std
+			# print(s0_std_list.shape)
+			# s1_mean=s1.mean(dim=(1,2))
+			# s1_list.extend(s1_mean)
+			# s1_std=s1.std(dim=(1,2))
+			# s1_std_list.extend(s1_std)
+			# diff_mean=(s1-s0).mean(dim=(1,2))
+			# diff_list.extend(diff_mean)
+			# diff_std=(s1-s0).std(dim=(1,2))
+			# diff_std_list.extend(diff_std)			
 			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag)
 			# model.module.latent_diff.register_hook(hook_f)
 			# model.module.produced_latent.register_hook(hook_f)
@@ -628,11 +889,34 @@ def train_epoch(model, dataset, optimizer,sampler,eval_dataset,eval_sampler):
 				# break
 			if cnt % 30 ==0:
 				print('start evaluation')
-				eval_loss=evaluation(model,eval_dataset=eval_dataset,eval_sampler=eval_sampler)
+				eval_loss=evaluation(model,eval_dataset=eval_dataset,eval_sampler=eval_sampler,iter=cnt,epoch=epoch)
 				eval_loss_curve.append(eval_loss)
 				training_curve(eval_loss_curve,mode='eval')
 			cnt += 1
+			data_iter_step+=1
+			# lr = optimizer.param_groups[0]["lr"]
+			# print('lr:',lr)
 			print('##', loss.mean().item())
+		# lr_scheduler.step(epoch)
+		# if cnt==200:
+		# N=cnt
+		# s0_list=torch.Tensor(s0_list)
+		# s1_list=torch.Tensor(s1_list)
+		# diff_list=torch.Tensor(diff_list)
+		# s0_std_list=torch.Tensor(s0_std_list)
+		# s1_std_list=torch.Tensor(s1_std_list)
+		# diff_std_list=torch.Tensor(diff_std_list)
+		# s0_list=s0_list/N
+		# s0_std_list=s0_std_list/N
+		# print('mean of s0:',s0_list)
+		# print('std of s0:',s0_std_list)
+		# print('len n:',N)
+		# print('mean and std of s1:',s1_list.mean(),s1_std_list.mean())
+		# print('mean and std of diff:',diff_list.mean(),diff_std_list.mean())
+		# print('len of list:',N)
+		# quit()
+	print('final eval loss:',eval_loss)
+
 
 
 def vqvae_recons(origin,recon,latent_recon):
@@ -685,9 +969,14 @@ def get_tune_dataset():
 
 
 def pretrain():
-	folder=os.path.exists(folder_name)
-	if not folder:
-		os.makedirs(folder_name)
+	# folder=os.path.exists(folder_name)
+	# subfolder=os.path.exists(folder_name+'/metric_data')
+	# if not folder:
+	# 	os.makedirs(folder_name)
+	# if not subfolder:
+	# 	os.makedirs(folder_name+'/metric_data')
+
+
 	# setup random seed
 	setup_seed(666)
 
@@ -701,6 +990,9 @@ def pretrain():
 	row_image_transform = transforms.Compose([
 		transforms.RandomCrop(224,pad_if_needed=True)
 	])
+	eval_image_transform = transforms.Compose([
+		transforms.CenterCrop(224)
+	])	
 	transform = Transforms()
 	model = Model('ssae', transform=transform)
 	# model=VQVAE(in_channels=3,embedding_dim=64,num_embeddings=512)
@@ -712,12 +1004,23 @@ def pretrain():
 
 	model.to(config.device)
 	model=nn.SyncBatchNorm.convert_sync_batchnorm(model)
+	eff_batch_size=config.batch_size*8
+	if config.lr is None:  # only base_lr is specified
+		config.lr = config.blr * eff_batch_size / 256	
+
+
+
 	model=torch.nn.parallel.DistributedDataParallel(model,broadcast_buffers=True, find_unused_parameters=True)
+	model_without_ddp = model.module
+	param_groups = optim_factory.add_weight_decay(model_without_ddp, 0.05) # origin 0.05
 	# broadcast_buffers=False ???????
 	# model.module.set_optimizer()
 	# set_optimizer()
 	# optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum, weight_decay=config.weight_decay)
-	optimizer = optim.Adam(model.parameters(), lr=0.0003)
+	# optimizer = optim.Adam(model.parameters(), lr=0.0003)
+	optimizer = torch.optim.AdamW(param_groups, lr=config.lr, betas=(0.9, 0.95))
+	# optimizer = create_optimizer(args, model_without_ddp)
+	# r_scheduler, _ = create_scheduler(args, optimizer)
 	# model.restore()
 	# model.module.save()
 	# exit(0)
@@ -736,19 +1039,22 @@ def pretrain():
 	subdir, block_id = 1, 25
 	# lr_schedule = [0.0001, 0.001, 0.01, 0.0333, 0.0666, 0.1, 0.2, 0.4, 0.8, 1.0]
 
-	train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
-	eval_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='eval')
+	# train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
+	# eval_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
 	# train_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
-	# eval_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='eval')
+	# eval_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
+	# use cache
+	train_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
+	eval_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
 	sampler=DistributedSampler(train_dataset)
 	eval_sampler=DistributedSampler(eval_dataset)
-	while True:
+	# while True:
 		# if subdir == 1 and block_id < len(lr_schedule):
 		# 	model.set_optimizer(config.lr * lr_schedule[block_id])
 		
 		# train_dataset = get_train_dataset(subdir, block_id)
 		# train_dataset = ssv2Dataset(image_path='/home/chc/dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None)
-		train_epoch(model, train_dataset,optimizer,sampler,eval_dataset,eval_sampler)
+	train_epoch(model, train_dataset,optimizer,sampler,eval_dataset,eval_sampler)
 		# vqvae_train_epoch(model, train_dataset,optimizer,sampler)
 		# del train_dataset
 		
@@ -759,12 +1065,12 @@ def pretrain():
 		# action_regress_test(model, tune_dataset)
 		# del tune_dataset
 		
-		block_id += 1
-		if block_id == 50:
-			subdir += 1
-			block_id = 0
-		if subdir == 5:
-			subdir = 1
+		# block_id += 1
+		# if block_id == 50:
+		# 	subdir += 1
+		# 	block_id = 0
+		# if subdir == 5:
+		# 	subdir = 1
 
 
 if __name__ == '__main__':

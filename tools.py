@@ -130,6 +130,15 @@ def get_data_loader(dataset,sampler):
 	                  num_workers=5)
 
 
+def get_eval_data_loader(dataset,sampler):
+	return DataLoader(dataset,
+	                  batch_size=config.eval_batch_size,
+					  sampler=sampler,
+	                  drop_last=True,
+	                  shuffle=False,
+	                  num_workers=5)					  
+
+
 def renormalize(tensor, first_dim=1):
 	# normalize the tensor (states)
 	if first_dim < 0:

@@ -15,11 +15,12 @@ parser.add_argument('-s', '--dataset', type=str, default='Breakout')
 parser.add_argument('-d', '--device', type=int, default=0)
 parser.add_argument('-r', '--restore', type=bool, default=False)
 # parser.add_argument('-l', '--lr', type=float, default=0.001)
-parser.add_argument('-l', '--lr', type=float, default=5e-4)
+parser.add_argument('-l', '--blr', type=float, default=1e-3)
 # parser.add_argument('-l', '--lr', type=float, default=0.05)
 parser.add_argument('-c', '--channel', type=int, default=1000)
 # parser.add_argument('-b', '--batch_size', type=int, default=256)
-parser.add_argument('-b', '--batch_size', type=int, default=4)
+parser.add_argument('-b', '--batch_size', type=int, default=32)
+parser.add_argument('-eb', '--eval_batch_size', type=int, default=4)
 parser.add_argument('-g', '--momentum', type=float, default=0.9)
 parser.add_argument('-w', '--weight_decay', type=float, default=0.0001)
 # parser.add_argument('-o', '--optimizer', type=str, default='Adam')
@@ -33,16 +34,21 @@ args = parser.parse_args()
 
 class Config:
 	def __init__(self):
+		self.epochs=20
+		self.warmup_epochs=2
 		self.batch_size = args.batch_size
+		self.eval_batch_size = args.eval_batch_size
 		self.channel = args.channel
-		self.lr = args.lr
+		self.blr = args.blr
+		self.lr=None
+		self.min_lr=0.
 		
 		self.momentum = args.momentum
 		self.weight_decay = args.weight_decay
 		self.clip_max = 1.0
 		self.tau = 0.999
 		# self.device = 'cuda:0'
-		self.device=torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+		self.device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 	
 		# self.layers_num = args.layers_num
 		
@@ -53,8 +59,8 @@ class Config:
 		self.state_size = self.state_shape[1] * self.state_shape[2]
 		
 		self.latent_action_channel = 64
-		self.num_embeddings = 256
-		self.latent_dim = 768
+		self.num_embeddings = 1024
+		self.latent_dim = 384
 		self.state_norm = args.state_norm
 		
 		self.max_dynamic_timestep = 5

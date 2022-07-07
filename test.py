@@ -39,6 +39,22 @@ def show_image(image, title=''):
     plt.axis('off')
     return
 
+def show_image_metric(image, title=''):
+    # image is [H, W, 3]
+    assert image.shape[2] == 3
+    plt.imshow(torch.clip((image) * 255, 0, 255).int())
+    plt.title(title, fontsize=16)
+    plt.axis('off')
+    return
+
+
+def save_preprocess(image):
+    # image=torch.clip((image * imagenet_std + imagenet_mean) * 255, 0, 255).int().numpy()
+    image=torch.clip((image * imagenet_std + imagenet_mean),0,1).numpy()
+    plt.axis('off')
+    return image
+
+
 def prepare_model(chkpt_dir, device,arch='mae_vit_base_patch16'):
     # build model
     model = getattr(models_mae, arch)()
