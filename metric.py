@@ -34,7 +34,8 @@ transforms = T.Compose([
 N=0
 S=0
 sum_lpips=0
-folder_name='./eval_visualization_RR_24_s_1024_42_bs256_adamW_cos_1e-3_standard'
+# folder_name='./eval_visualization_RR_24_s_1024_42_bs256_adamW_cos_1e-3_standard'
+folder_name='./robonet_test'
 subfolder=os.path.exists(folder_name+'/metric_result_all')
 if not subfolder:
 	os.makedirs(folder_name+'/metric_result_all')

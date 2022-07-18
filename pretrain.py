@@ -1,7 +1,7 @@
-import imp
 import pickle
 from pickletools import optimize
 from pyexpat import model
+from time import time
 import matplotlib
 import torch
 from torch import nn
@@ -14,7 +14,7 @@ import numpy as np
 from tools import log, log_setting, NT_Xent, renormalize, simsiam_distance, get_data_loader, get_eval_data_loader
 import torch.nn.functional as F
 from atari import AtariDataset
-from ssv2 import ssv2Dataset
+from ssv2 import ssv2Dataset,ssv2VideoDataset, ego4dDataset
 from model import RepresentationNetwork
 import matplotlib.pyplot as plt
 from torchvision import transforms
@@ -34,6 +34,8 @@ import math
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 import argparse
+import cv2
+import time
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser()
@@ -97,8 +99,8 @@ s_std=torch.tensor([0.121, 0.161, 0.057, 0.140, 0.096, 0.074, 0.238, 0.264, 0.13
 
 
 # folder_name='./eval_visualization_RR_24_1loss_256_4_2_vits_metric'
-folder_name='./eval_visualization_RR_24_s_1024_42_bs256_adamW_cos_1e-3_standard'
-# folder_name='./test'
+# folder_name='./eval_visualization_RR_24_s_1024_42_bs256_adamW_cos_1e-3_standard'
+folder_name='./robonet_test'
 pyplot_cnt = 0
 
 folder=os.path.exists(folder_name)
@@ -751,7 +753,7 @@ def evaluation(model,eval_dataset,eval_sampler,iter,epoch):
 	cnt=0
 	model.eval()
 	eval_loss_sum=0
-	eval_data_loader=get_data_loader(eval_dataset,eval_sampler)
+	eval_data_loader=get_eval_data_loader(eval_dataset,eval_sampler)
 	for data in eval_data_loader:
 		cnt+=1
 		obs0, obs1 =data
@@ -779,7 +781,7 @@ def evaluation(model,eval_dataset,eval_sampler,iter,epoch):
 			obs0, obs1, _obs0, _obs1,obs1_blur,s0, s1_out, s1, _s1, loss_lag=model(obs0, obs1,s_mean,s_std)
 			loss=model.module.calculate_loss(obs0, obs1, _obs0, _obs1,s0, s1_out, s1, _s1, loss_lag)
 		eval_loss_sum+=loss.mean().item()
-		if cnt%3==1:
+		if True:
 			model.module.visualize(obs0,_obs0,obs1,_obs1,obs1_blur,s1, _s1,cnt)
 		if epoch%10==9:
 			model.module.save_fig(obs0,_obs0,obs1,_obs1,obs1_blur,cnt)
@@ -1044,8 +1046,19 @@ def pretrain():
 	# train_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
 	# eval_dataset = ssv2Dataset(image_path='/public/share_dataset/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
 	# use cache
-	train_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
-	eval_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
+	# train_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=row_image_transform,cut=None,mode='train')
+	# eval_dataset = ssv2Dataset(image_path='/cache0/cuihanchen/ssv2_extracted_frames_5',transform=eval_image_transform,cut=None,mode='eval')
+	# read from video
+	# train_dataset = ssv2VideoDataset(image_path='/public/MARS/datasets/ssv2/20bn-something-something-v2',transform=row_image_transform,cut=None,mode='train')
+	# eval_dataset = ssv2VideoDataset(image_path='/public/MARS/datasets/ssv2/20bn-something-something-v2',transform=row_image_transform,cut=None,mode='eval')	
+	# ego4d toy
+	# train_dataset = ego4dDataset(image_path='/cache0/cuihanchen/frames',transform=row_image_transform,cut=None,mode='train')
+	# eval_dataset = ego4dDataset(image_path='/cache0/cuihanchen/frames',transform=row_image_transform,cut=None,mode='eval')	
+	train_dataset = ego4dDataset(image_path='/public/share_dataset/chc/robonet_frames',transform=row_image_transform,cut=None,mode='train')
+	eval_dataset = ego4dDataset(image_path='/public/share_dataset/chc/robonet_frames',transform=row_image_transform,cut=None,mode='eval')	
+
+
+
 	sampler=DistributedSampler(train_dataset)
 	eval_sampler=DistributedSampler(eval_dataset)
 	# while True:
@@ -1074,6 +1087,9 @@ def pretrain():
 
 
 if __name__ == '__main__':
+	start=time.time()
 	pretrain()
+	end=time.time()
+	print('run time:',end-start)
 
 # torchrun --nproc_per_node=8 pretrain.py

@@ -20,7 +20,7 @@ parser.add_argument('-l', '--blr', type=float, default=1e-3)
 parser.add_argument('-c', '--channel', type=int, default=1000)
 # parser.add_argument('-b', '--batch_size', type=int, default=256)
 parser.add_argument('-b', '--batch_size', type=int, default=32)
-parser.add_argument('-eb', '--eval_batch_size', type=int, default=4)
+parser.add_argument('-eb', '--eval_batch_size', type=int, default=32)
 parser.add_argument('-g', '--momentum', type=float, default=0.9)
 parser.add_argument('-w', '--weight_decay', type=float, default=0.0001)
 # parser.add_argument('-o', '--optimizer', type=str, default='Adam')
@@ -34,8 +34,8 @@ args = parser.parse_args()
 
 class Config:
 	def __init__(self):
-		self.epochs=20
-		self.warmup_epochs=2
+		self.epochs=200
+		self.warmup_epochs=20
 		self.batch_size = args.batch_size
 		self.eval_batch_size = args.eval_batch_size
 		self.channel = args.channel
