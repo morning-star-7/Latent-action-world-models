@@ -14,7 +14,11 @@ This repository is the official PyTorch implementation of the paper **"A Univers
 
 **TL;DR.** We learn a universal world model from large-scale, diverse videos by encoding adjacent frames, extracting latent actions via vector quantization (VQ), and learning dynamics in the latent space; the model generalizes across domains and can be efficiently adapted with limited in-domain data.
 
+<div align="center">
+
 ![Framework overview](img/latent_action_world_model.png)
+
+</div>
 
 ---
 
