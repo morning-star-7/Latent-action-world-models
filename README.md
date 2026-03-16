@@ -123,4 +123,4 @@ If you find this repository or the paper useful, please cite:
 
 ## License
 
-Parts of the code (e.g., `models_mae.py`) are from Meta’s MAE implementation and follow their original LICENSE; the rest is subject to the LICENSE in this repository.
+This repository is licensed under the [MIT License](LICENSE). Parts of the code (e.g., `models_mae.py`, files in `util/`) are from Meta’s MAE implementation and follow their original license terms.
